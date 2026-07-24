@@ -246,8 +246,12 @@ class TesteIntegracao(unittest.TestCase):
 
     def test_interface_sugere_saida_ao_lado_do_livro(self) -> None:
         sugestao = Path(sugerir_saida(str(Path("C:/livros/meu_livro.pdf"))))
-        self.assertEqual(sugestao.name, "Diagramas_Livro.pdf")
+        self.assertEqual(sugestao.name, "meu_livro_diagramas.pdf")
         self.assertEqual(sugestao.parent.name, "livros")
+
+        sugestao_acentuada = Path(sugerir_saida(str(Path("C:/Meus Livros/posição final.PDF"))))
+        self.assertEqual(sugestao_acentuada.name, "posição final_diagramas.pdf")
+        self.assertEqual(sugestao_acentuada.parent.name, "Meus Livros")
 
     def test_pdf_sintetico_gera_um_diagrama_por_pagina_a4(self) -> None:
         with tempfile.TemporaryDirectory() as pasta:

@@ -1,23 +1,62 @@
-"""Interface grafica simples para o extrator de diagramas."""
+"""Interface Windows do Chess Book Diagram Extractor."""
 
 from __future__ import annotations
 
 import os
+import json
+import logging
 import queue
 import subprocess
 import sys
 import threading
 import tkinter as tk
+import webbrowser
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox
+
+import ttkbootstrap as ttk
+from ttkbootstrap.style import ThemeDefinition
+from ttkbootstrap.widgets import ToolTip
 
 from autoupdate import Atualizacao, baixar_atualizacao, consultar_atualizacao, iniciar_instalador
 from extrair_tabuleiros_pdf import ErroExtracao, ResultadoExtracao, processar_pdf
-from version import GITHUB_REPOSITORY, PUBLISHER, __version__
+from version import GITHUB_REPOSITORY, __version__
 
 
-COR_FUNDO = "#f4f6f8"
-COR_PRIMARIA = "#2457a6"
+TEMA = "chesslight"
+LARGURA_JANELA = 760
+ALTURA_JANELA = 460
+REPOSITORIO_PUBLICO = GITHUB_REPOSITORY or "e-Lopes/chess-book-diagram-extractor"
+URL_GITHUB = f"https://github.com/{REPOSITORIO_PUBLICO}"
+
+
+def pasta_dados_aplicativo() -> Path:
+    base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    return base / "ChessBookDiagramExtractor"
+
+
+def carregar_preferencia_abrir_pdf() -> bool:
+    try:
+        dados = json.loads((pasta_dados_aplicativo() / "settings.json").read_text(encoding="utf-8"))
+        return bool(dados.get("abrir_pdf_ao_concluir", True))
+    except (OSError, ValueError, TypeError):
+        return True
+
+
+def configurar_logger() -> logging.Logger:
+    logger = logging.getLogger("ChessBookDiagramExtractor")
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.INFO)
+    try:
+        pasta = pasta_dados_aplicativo()
+        pasta.mkdir(parents=True, exist_ok=True)
+        handler: logging.Handler = logging.FileHandler(pasta / "app.log", encoding="utf-8")
+    except OSError:
+        handler = logging.NullHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(handler)
+    return logger
 
 
 def caminho_recurso(*partes: str) -> Path:
@@ -28,7 +67,8 @@ def caminho_recurso(*partes: str) -> Path:
 def sugerir_saida(caminho_entrada: str) -> str:
     if not caminho_entrada:
         return ""
-    return str(Path(caminho_entrada).parent / "Diagramas_Livro.pdf")
+    entrada = Path(caminho_entrada)
+    return str(entrada.with_name(f"{entrada.stem}_diagramas.pdf"))
 
 
 def localizar_desinstalador() -> Path | None:
@@ -39,152 +79,440 @@ def localizar_desinstalador() -> Path | None:
 
 
 class InterfaceExtrator:
-    def __init__(self, raiz: tk.Tk) -> None:
+    def __init__(self, raiz: ttk.Window) -> None:
         self.raiz = raiz
-        self.raiz.title(f"Chess Book Diagram Extractor — v{__version__}")
-        self.raiz.geometry("780x550")
-        self.raiz.minsize(700, 510)
-        self.raiz.configure(bg=COR_FUNDO)
-        caminho_icone = caminho_recurso("icon", "icon.png")
-        if caminho_icone.is_file():
-            self._icone_janela = tk.PhotoImage(file=caminho_icone)
+        self.raiz.title("Chess Book Diagram Extractor")
+        self.raiz.geometry(f"{LARGURA_JANELA}x{ALTURA_JANELA}")
+        self.raiz.minsize(720, 440)
+        self.raiz.resizable(True, True)
+        self.raiz.option_add("*Font", ("Segoe UI", 10))
+
+        caminho_ico = caminho_recurso("icon", "icon.ico")
+        caminho_png = caminho_recurso("icon", "icon.png")
+        icone_configurado = False
+        if sys.platform == "win32" and caminho_ico.is_file():
+            try:
+                self.raiz.iconbitmap(str(caminho_ico))
+                icone_configurado = True
+            except tk.TclError:
+                pass
+        if not icone_configurado and caminho_png.is_file():
+            self._icone_janela = tk.PhotoImage(file=caminho_png)
             self.raiz.iconphoto(True, self._icone_janela)
 
         self.entrada = tk.StringVar()
         self.saida = tk.StringVar()
-        self.status = tk.StringVar(value="Selecione um livro em PDF para começar.")
+        self.entrada_exibida = tk.StringVar(value="Nenhum arquivo selecionado")
+        self.saida_exibida = tk.StringVar(value="Definido após selecionar um PDF")
+        self.abrir_ao_concluir = tk.BooleanVar(value=carregar_preferencia_abrir_pdf())
+        self.status = tk.StringVar(value="Selecione um arquivo PDF para começar.")
+        # Mantida para compatibilidade com o fluxo existente, mas não é exibida.
         self.detalhes = tk.StringVar(value="Nenhum processamento em andamento.")
         self.eventos: queue.Queue[tuple[str, object]] = queue.Queue()
         self.processando = False
         self.atualizando = False
         self.verificacao_silenciosa = False
         self.ultimo_resultado: ResultadoExtracao | None = None
+        self.atualizacao_pendente: Atualizacao | None = None
+        self.janela_sobre: ttk.Toplevel | None = None
+        self.ultimo_diretorio = Path.cwd()
+        self.logger = configurar_logger()
 
         self._configurar_estilo()
         self._montar_tela()
+        self.entrada.trace_add("write", self._ao_alterar_entrada)
+        self.raiz.bind("<Return>", self._ao_pressionar_enter)
+        self.raiz.after_idle(self._centralizar_janela)
         self.raiz.protocol("WM_DELETE_WINDOW", self._ao_fechar)
         self.raiz.after(100, self._verificar_eventos)
         if GITHUB_REPOSITORY:
             self.raiz.after(2500, lambda: self._verificar_atualizacoes(silencioso=True))
 
     def _configurar_estilo(self) -> None:
-        estilo = ttk.Style(self.raiz)
-        if "vista" in estilo.theme_names():
-            estilo.theme_use("vista")
-        estilo.configure("Fundo.TFrame", background=COR_FUNDO)
-        estilo.configure("Titulo.TLabel", background=COR_FUNDO, foreground="#18202a", font=("Segoe UI", 18, "bold"))
-        estilo.configure("Texto.TLabel", background=COR_FUNDO, foreground="#3b4654", font=("Segoe UI", 10))
-        estilo.configure("Status.TLabel", background="#ffffff", foreground="#263442", font=("Segoe UI", 10))
-        estilo.configure("Acao.TButton", font=("Segoe UI", 10, "bold"), padding=(14, 8))
+        estilo = ttk.Style()
+        if TEMA not in estilo.theme_names():
+            estilo.register_theme(
+                ThemeDefinition(
+                    name=TEMA,
+                    themetype="light",
+                    colors={
+                        "primary": "#176B5B",
+                        "secondary": "#667085",
+                        "success": "#16803A",
+                        "info": "#176B5B",
+                        "warning": "#B26A00",
+                        "danger": "#C62828",
+                        "light": "#F5F7FA",
+                        "dark": "#18212F",
+                        "bg": "#F5F7FA",
+                        "fg": "#18212F",
+                        "selectbg": "#176B5B",
+                        "selectfg": "#FFFFFF",
+                        "border": "#D0D5DD",
+                        "inputfg": "#18212F",
+                        "inputbg": "#FFFFFF",
+                        "active": "#E7ECEA",
+                    },
+                )
+            )
+        estilo.theme_use(TEMA)
+        estilo.configure("TLabel", font=("Segoe UI", 10))
+        estilo.configure("TButton", font=("Segoe UI", 10))
+        estilo.configure("TCheckbutton", font=("Segoe UI", 9))
+        estilo.configure("HeaderTitle.TLabel", font=("Segoe UI", 20, "bold"))
+        estilo.configure("HeaderSubtitle.TLabel", font=("Segoe UI", 10))
+        estilo.configure("FieldLabel.TLabel", font=("Segoe UI", 10, "bold"))
+        estilo.configure("Status.TLabel", font=("Segoe UI", 9))
+        estilo.configure("Footer.TLabel", font=("Segoe UI", 9))
+        estilo.configure("primary.TButton", font=("Segoe UI", 10, "bold"), padding=(18, 11))
+        estilo.configure("primary.Outline.TButton", font=("Segoe UI", 10), padding=(12, 8))
+        estilo.configure("secondary.Outline.TButton", font=("Segoe UI", 10), padding=(12, 8))
+        estilo.configure("success.Outline.TButton", font=("Segoe UI", 10), padding=(12, 8))
+        estilo.configure("info.Outline.TButton", font=("Segoe UI", 9, "bold"), padding=(10, 6))
+        estilo.configure("TEntry", padding=(9, 7), font=("Segoe UI", 9))
+
+    def _centralizar_janela(self) -> None:
+        self.raiz.update_idletasks()
+        largura = max(self.raiz.winfo_width(), LARGURA_JANELA)
+        altura = max(self.raiz.winfo_height(), ALTURA_JANELA)
+        x = max(0, (self.raiz.winfo_screenwidth() - largura) // 2)
+        y = max(0, (self.raiz.winfo_screenheight() - altura) // 2)
+        self.raiz.geometry(f"{largura}x{altura}+{x}+{y}")
 
     def _montar_tela(self) -> None:
-        principal = ttk.Frame(self.raiz, style="Fundo.TFrame", padding=28)
+        principal = ttk.Frame(self.raiz, padding=(24, 20, 24, 12))
         principal.pack(fill="both", expand=True)
         principal.columnconfigure(0, weight=1)
+        principal.rowconfigure(1, weight=1)
 
-        ttk.Label(principal, text="Chess Book Diagram Extractor", style="Titulo.TLabel").grid(row=0, column=0, sticky="w")
+        self._criar_cabecalho(principal)
+        self._criar_formulario(principal)
+        self._criar_opcoes(principal)
+        self._criar_progresso_e_acoes(principal)
+        self._criar_rodape(principal)
+
+    def _criar_cabecalho(self, principal: ttk.Frame) -> None:
+        cabecalho = ttk.Frame(principal)
+        cabecalho.grid(row=0, column=0, sticky="ew", pady=(0, 16))
+        cabecalho.columnconfigure(0, weight=1)
+
         ttk.Label(
-            principal,
-            text="Localize os tabuleiros 8×8 do livro e crie um PDF A4 com um diagrama por página.",
-            style="Texto.TLabel",
-        ).grid(row=1, column=0, sticky="w", pady=(4, 24))
+            cabecalho,
+            text="Chess Book Diagram Extractor",
+            style="HeaderTitle.TLabel",
+        ).grid(row=0, column=0, sticky="sw")
+        ttk.Label(
+            cabecalho,
+            text="Extraia diagramas 8×8 de livros em PDF",
+            style="HeaderSubtitle.TLabel",
+            bootstyle="secondary",
+        ).grid(row=1, column=0, sticky="nw", pady=(2, 0))
 
-        formulario = ttk.Frame(principal, style="Fundo.TFrame")
-        formulario.grid(row=2, column=0, sticky="ew")
+        self.botao_atualizar = ttk.Menubutton(
+            cabecalho,
+            text="⋯",
+            width=3,
+            bootstyle="secondary outline",
+            direction="below",
+        )
+        self.botao_atualizar.grid(row=0, column=1, rowspan=2, sticky="ne")
+        menu_acoes = tk.Menu(self.botao_atualizar, tearoff=False)
+        menu_acoes.add_command(label="Verificar atualizações", command=self._verificar_atualizacoes)
+        menu_acoes.add_command(label="Abrir página do GitHub", command=self._abrir_github)
+        menu_acoes.add_separator()
+        menu_acoes.add_command(label="Sobre", command=self._mostrar_sobre)
+        menu_acoes.add_command(label="Sair", command=self._ao_fechar)
+        self.botao_atualizar["menu"] = menu_acoes
+        ToolTip(self.botao_atualizar, text="Mais opções", delay=400)
+
+    def _criar_formulario(self, principal: ttk.Frame) -> None:
+        formulario = ttk.Frame(principal, padding=16, bootstyle="@card")
+        formulario.grid(row=1, column=0, sticky="nsew")
         formulario.columnconfigure(0, weight=1)
 
-        ttk.Label(formulario, text="Livro em PDF", style="Texto.TLabel").grid(row=0, column=0, sticky="w")
-        linha_entrada = ttk.Frame(formulario, style="Fundo.TFrame")
-        linha_entrada.grid(row=1, column=0, sticky="ew", pady=(5, 16))
-        linha_entrada.columnconfigure(0, weight=1)
-        self.campo_entrada = ttk.Entry(linha_entrada, textvariable=self.entrada)
-        self.campo_entrada.grid(row=0, column=0, sticky="ew", padx=(0, 10))
-        self.botao_entrada = ttk.Button(linha_entrada, text="Selecionar...", command=self._selecionar_entrada)
-        self.botao_entrada.grid(row=0, column=1)
-
-        ttk.Label(formulario, text="PDF de saída", style="Texto.TLabel").grid(row=2, column=0, sticky="w")
-        linha_saida = ttk.Frame(formulario, style="Fundo.TFrame")
-        linha_saida.grid(row=3, column=0, sticky="ew", pady=(5, 22))
-        linha_saida.columnconfigure(0, weight=1)
-        self.campo_saida = ttk.Entry(linha_saida, textvariable=self.saida)
-        self.campo_saida.grid(row=0, column=0, sticky="ew", padx=(0, 10))
-        self.botao_saida = ttk.Button(linha_saida, text="Salvar como...", command=self._selecionar_saida)
-        self.botao_saida.grid(row=0, column=1)
-
-        self.progresso = ttk.Progressbar(principal, mode="determinate", maximum=100)
-        self.progresso.grid(row=3, column=0, sticky="ew", pady=(0, 10))
-
-        caixa_status = ttk.Frame(principal, padding=15)
-        caixa_status.grid(row=4, column=0, sticky="ew", pady=(0, 22))
-        caixa_status.columnconfigure(0, weight=1)
-        ttk.Label(caixa_status, textvariable=self.status, style="Status.TLabel", wraplength=650).grid(row=0, column=0, sticky="w")
-        ttk.Label(caixa_status, textvariable=self.detalhes, style="Status.TLabel").grid(row=1, column=0, sticky="w", pady=(6, 0))
-
-        acoes = ttk.Frame(principal, style="Fundo.TFrame")
-        acoes.grid(row=5, column=0, sticky="ew")
-        acoes.columnconfigure(0, weight=1)
-        self.botao_abrir = ttk.Button(acoes, text="Abrir pasta do resultado", command=self._abrir_pasta, state="disabled")
-        self.botao_abrir.grid(row=0, column=0, sticky="w")
-        self.botao_processar = ttk.Button(acoes, text="Extrair diagramas", style="Acao.TButton", command=self._iniciar)
-        self.botao_processar.grid(row=0, column=1, sticky="e")
-
-        utilitarios = ttk.Frame(principal, style="Fundo.TFrame")
-        utilitarios.grid(row=6, column=0, sticky="ew", pady=(18, 0))
-        utilitarios.columnconfigure(1, weight=1)
-        self.botao_atualizar = ttk.Button(utilitarios, text="Verificar atualizações", command=self._verificar_atualizacoes)
-        self.botao_atualizar.grid(row=0, column=0, sticky="w", padx=(0, 10))
-        estado_desinstalar = "normal" if localizar_desinstalador() else "disabled"
-        self.botao_desinstalar = ttk.Button(
-            utilitarios,
-            text="Desinstalar programa",
-            command=self._desinstalar,
-            state=estado_desinstalar,
+        ttk.Label(formulario, text="Arquivo de entrada", style="FieldLabel.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w"
         )
-        self.botao_desinstalar.grid(row=0, column=1, sticky="w")
+        self.campo_entrada = ttk.Entry(formulario, textvariable=self.entrada_exibida, state="readonly")
+        self.campo_entrada.grid(row=1, column=0, sticky="ew", padx=(0, 10), pady=(5, 12))
+        self.tooltip_entrada = ToolTip(
+            self.campo_entrada,
+            text="Selecione um livro em PDF.",
+            wraplength=520,
+            delay=450,
+        )
+        self.botao_entrada = ttk.Button(
+            formulario,
+            text="Selecionar PDF",
+            command=self._selecionar_entrada,
+            bootstyle="primary outline",
+        )
+        self.botao_entrada.grid(row=1, column=1, sticky="e", pady=(5, 12))
+
+        ttk.Label(formulario, text="Arquivo de saída", style="FieldLabel.TLabel").grid(
+            row=2, column=0, columnspan=2, sticky="w"
+        )
+        self.campo_saida = ttk.Entry(formulario, textvariable=self.saida_exibida, state="readonly")
+        self.campo_saida.grid(row=3, column=0, sticky="ew", padx=(0, 10), pady=(5, 0))
+        self.tooltip_saida = ToolTip(
+            self.campo_saida,
+            text="A saída será criada na mesma pasta do livro.",
+            wraplength=520,
+            delay=450,
+        )
+        self.botao_saida = ttk.Button(
+            formulario,
+            text="Alterar",
+            command=self._selecionar_saida,
+            state="disabled",
+            bootstyle="secondary outline",
+        )
+        self.botao_saida.grid(row=3, column=1, sticky="e", pady=(5, 0))
+
+    def _criar_opcoes(self, principal: ttk.Frame) -> None:
+        opcoes = ttk.Frame(principal)
+        opcoes.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        self.checkbox_abrir = ttk.Checkbutton(
+            opcoes,
+            text="Abrir o PDF ao concluir",
+            variable=self.abrir_ao_concluir,
+            bootstyle="primary",
+            command=self._salvar_preferencia,
+        )
+        self.checkbox_abrir.pack(side="left")
+
+    def _criar_progresso_e_acoes(self, principal: ttk.Frame) -> None:
+        self.progresso = ttk.Progressbar(
+            principal,
+            mode="determinate",
+            maximum=100,
+            bootstyle="primary thin",
+        )
+        self.progresso.grid(row=3, column=0, sticky="ew", pady=(12, 7))
+
+        linha_status = ttk.Frame(principal)
+        linha_status.grid(row=4, column=0, sticky="ew")
+        linha_status.columnconfigure(0, weight=1)
+        self.rotulo_status = ttk.Label(
+            linha_status,
+            textvariable=self.status,
+            style="Status.TLabel",
+            bootstyle="secondary",
+            anchor="w",
+        )
+        self.rotulo_status.grid(row=0, column=0, sticky="ew")
+        self.botao_instalar_atualizacao = ttk.Button(
+            linha_status,
+            text="Atualizar",
+            command=self._iniciar_atualizacao_pendente,
+            bootstyle="info outline",
+        )
+        self.botao_instalar_atualizacao.grid(row=0, column=1, sticky="e", padx=(10, 0))
+        self.botao_instalar_atualizacao.grid_remove()
+        ToolTip(
+            self.botao_instalar_atualizacao,
+            text="Baixar e instalar a nova versão disponível.",
+            delay=400,
+        )
+
+        acoes = ttk.Frame(principal)
+        acoes.grid(row=5, column=0, sticky="ew", pady=(14, 0))
+        acoes.columnconfigure(1, weight=1)
+
+        self.botao_abrir_pdf = ttk.Button(
+            acoes,
+            text="Abrir PDF",
+            command=self._abrir_pdf,
+            bootstyle="success outline",
+        )
+        self.botao_abrir_pdf.grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.botao_abrir = ttk.Button(
+            acoes,
+            text="Abrir pasta",
+            command=self._abrir_pasta,
+            bootstyle="secondary outline",
+        )
+        self.botao_abrir.grid(row=0, column=1, sticky="w")
+        ToolTip(self.botao_abrir, text="Abrir a pasta onde o PDF foi salvo.", delay=400)
+        self.botao_processar = ttk.Button(
+            acoes,
+            text="Extrair diagramas",
+            command=self._iniciar,
+            state="disabled",
+            bootstyle="primary",
+        )
+        self.botao_processar.grid(row=0, column=2, sticky="e")
+        self._ocultar_acoes_resultado()
+
+    def _criar_rodape(self, principal: ttk.Frame) -> None:
+        rodape = ttk.Frame(principal)
+        rodape.grid(row=6, column=0, sticky="ew", pady=(12, 0))
+        ttk.Separator(rodape).pack(fill="x", pady=(0, 7))
         ttk.Label(
-            utilitarios,
-            text=f"v{__version__} • Editor: {PUBLISHER}",
-            style="Texto.TLabel",
-        ).grid(row=0, column=2, sticky="e")
+            rodape,
+            text=f"v{__version__} · E-Lopes",
+            style="Footer.TLabel",
+            bootstyle="secondary",
+        ).pack(side="right")
+
+    def _definir_status(self, mensagem: str, tipo: str = "secondary") -> None:
+        self.status.set(mensagem)
+        self.rotulo_status.configure(bootstyle=tipo)
+
+    def _salvar_preferencia(self) -> None:
+        try:
+            pasta = pasta_dados_aplicativo()
+            pasta.mkdir(parents=True, exist_ok=True)
+            temporario = pasta / "settings.json.tmp"
+            temporario.write_text(
+                json.dumps({"abrir_pdf_ao_concluir": self.abrir_ao_concluir.get()}, indent=2),
+                encoding="utf-8",
+            )
+            temporario.replace(pasta / "settings.json")
+        except OSError:
+            self.logger.warning("Não foi possível salvar a preferência da interface.", exc_info=True)
+
+    def _ao_pressionar_enter(self, _evento: object) -> None:
+        if str(self.botao_processar.cget("state")) != "disabled" and not self.processando:
+            self._iniciar()
+
+    def _abrir_github(self) -> None:
+        webbrowser.open(URL_GITHUB)
+
+    def _mostrar_sobre(self) -> None:
+        if self.janela_sobre is not None and self.janela_sobre.winfo_exists():
+            self.janela_sobre.focus_force()
+            return
+
+        janela = ttk.Toplevel(master=self.raiz)
+        self.janela_sobre = janela
+        janela.title("Sobre")
+        janela.geometry("440x285")
+        janela.resizable(False, False)
+        janela.transient(self.raiz)
+        janela.grab_set()
+        janela.bind("<Escape>", lambda _evento: janela.destroy())
+
+        janela.update_idletasks()
+        x = self.raiz.winfo_rootx() + (self.raiz.winfo_width() - 440) // 2
+        y = self.raiz.winfo_rooty() + (self.raiz.winfo_height() - 285) // 2
+        janela.geometry(f"440x285+{max(0, x)}+{max(0, y)}")
+
+        conteudo = ttk.Frame(janela, padding=24)
+        conteudo.pack(fill="both", expand=True)
+        ttk.Label(conteudo, text="Chess Book Diagram Extractor", style="HeaderTitle.TLabel").pack()
+        ttk.Label(conteudo, text=f"Versão {__version__}", bootstyle="secondary").pack(pady=(2, 12))
+        ttk.Label(
+            conteudo,
+            text=(
+                "Ferramenta para localizar diagramas de xadrez 8×8 em livros PDF "
+                "e gerar um novo documento com um diagrama por página."
+            ),
+            justify="center",
+            wraplength=380,
+        ).pack()
+        ttk.Label(conteudo, text="Desenvolvido por E-Lopes · Licença MIT", bootstyle="secondary").pack(
+            pady=(12, 4)
+        )
+        ttk.Button(
+            conteudo,
+            text="Abrir repositório no GitHub",
+            command=self._abrir_github,
+            bootstyle="primary link",
+        ).pack()
+
+    def _ao_alterar_entrada(self, *_args: object) -> None:
+        if self.processando:
+            return
+        self._atualizar_estado_principal()
+
+    def _entrada_valida(self) -> bool:
+        entrada = Path(self.entrada.get().strip())
+        return entrada.is_file() and entrada.suffix.lower() == ".pdf"
+
+    def _atualizar_estado_principal(self) -> None:
+        if self.processando or self.atualizando:
+            self.botao_processar.configure(state="disabled")
+            return
+        entrada_valida = self._entrada_valida()
+        self.botao_saida.configure(state="normal" if entrada_valida else "disabled")
+        valido = entrada_valida and bool(self.saida.get().strip())
+        self.botao_processar.configure(state="normal" if valido else "disabled")
+        if self.entrada.get().strip() and not self._entrada_valida():
+            self._definir_status("Selecione um arquivo PDF válido.", "danger")
+        elif valido and self.ultimo_resultado is None:
+            self._definir_status("PDF selecionado. Pronto para extrair.", "primary")
+
+    def _ocultar_acoes_resultado(self) -> None:
+        self.botao_abrir_pdf.grid_remove()
+        self.botao_abrir.grid_remove()
+
+    def _mostrar_acoes_resultado(self) -> None:
+        self.botao_abrir_pdf.grid()
+        self.botao_abrir.grid()
 
     def _selecionar_entrada(self) -> None:
         caminho = filedialog.askopenfilename(
             parent=self.raiz,
             title="Selecione o livro em PDF",
+            initialdir=self.ultimo_diretorio,
             filetypes=[("Arquivos PDF", "*.pdf"), ("Todos os arquivos", "*.*")],
         )
         if caminho:
+            caminho_pdf = Path(caminho)
             self.entrada.set(caminho)
-            if not self.saida.get().strip():
-                self.saida.set(sugerir_saida(caminho))
+            self.saida.set(sugerir_saida(caminho))
+            self.entrada_exibida.set(caminho_pdf.name)
+            self.saida_exibida.set(Path(self.saida.get()).name)
+            self.tooltip_entrada.text = str(caminho_pdf)
+            self.tooltip_saida.text = self.saida.get()
+            self.ultimo_diretorio = caminho_pdf.parent
+            self.ultimo_resultado = None
+            self._ocultar_acoes_resultado()
+            self._atualizar_estado_principal()
 
     def _selecionar_saida(self) -> None:
         entrada = self.entrada.get().strip()
-        inicial = Path(entrada).parent if entrada else Path.cwd()
+        sugestao = Path(sugerir_saida(entrada)) if entrada else self.ultimo_diretorio / "livro_diagramas.pdf"
         caminho = filedialog.asksaveasfilename(
             parent=self.raiz,
             title="Salvar PDF com os diagramas",
-            initialdir=inicial,
-            initialfile="Diagramas_Livro.pdf",
+            initialdir=sugestao.parent,
+            initialfile=sugestao.name,
             defaultextension=".pdf",
             filetypes=[("Arquivos PDF", "*.pdf")],
         )
         if caminho:
             self.saida.set(caminho)
+            self.saida_exibida.set(Path(caminho).name)
+            self.tooltip_saida.text = caminho
+            self.ultimo_diretorio = Path(caminho).parent
+            self._atualizar_estado_principal()
 
     def _validar(self) -> tuple[str, str] | None:
         entrada, saida = self.entrada.get().strip(), self.saida.get().strip()
         if not entrada:
             messagebox.showwarning("Livro não selecionado", "Selecione o livro em PDF.", parent=self.raiz)
             return None
-        if not Path(entrada).is_file():
-            messagebox.showerror("Arquivo não encontrado", "O livro selecionado não existe.", parent=self.raiz)
+        if not Path(entrada).is_file() or Path(entrada).suffix.lower() != ".pdf":
+            messagebox.showerror("Arquivo inválido", "Selecione um arquivo PDF válido.", parent=self.raiz)
             return None
         if not saida:
             messagebox.showwarning("Destino não selecionado", "Escolha onde salvar o PDF de saída.", parent=self.raiz)
             return None
-        if Path(entrada).resolve() == Path(saida).resolve():
+        caminho_saida = Path(saida)
+        if Path(entrada).resolve() == caminho_saida.resolve():
             messagebox.showerror("Destino inválido", "O PDF de saída não pode substituir o livro original.", parent=self.raiz)
+            return None
+        if caminho_saida.suffix.lower() != ".pdf":
+            messagebox.showerror("Destino inválido", "O arquivo de saída precisa ter a extensão .pdf.", parent=self.raiz)
+            return None
+        if not caminho_saida.parent.is_dir() or not os.access(caminho_saida.parent, os.W_OK):
+            messagebox.showerror(
+                "Pasta sem permissão",
+                "Escolha uma pasta em que o aplicativo possa salvar o PDF.",
+                parent=self.raiz,
+            )
             return None
         return entrada, saida
 
@@ -196,9 +524,10 @@ class InterfaceExtrator:
         self.processando = True
         self.ultimo_resultado = None
         self.progresso["value"] = 0
-        self.status.set("Preparando o livro...")
+        self._definir_status("Preparando o livro...", "info")
         self.detalhes.set("O tempo depende da quantidade de páginas.")
-        self.botao_abrir.configure(state="disabled")
+        self._ocultar_acoes_resultado()
+        self.botao_processar.configure(text="Extraindo...")
         self._alternar_controles(False)
         threading.Thread(target=self._processar, args=(entrada, saida), daemon=True).start()
 
@@ -210,6 +539,7 @@ class InterfaceExtrator:
             resultado = processar_pdf(entrada, saida, progresso=informar)
             self.eventos.put(("concluido", resultado))
         except Exception as erro:
+            self.logger.exception("Falha durante a extração do PDF.")
             self.eventos.put(("erro", erro))
 
     def _verificar_eventos(self) -> None:
@@ -219,8 +549,10 @@ class InterfaceExtrator:
                 if tipo == "progresso":
                     atual, total, encontrados = dados  # type: ignore[misc]
                     self.progresso["value"] = atual / max(1, total) * 100
-                    self.status.set(f"Processando página {atual} de {total}...")
-                    self.detalhes.set(f"{encontrados} diagrama(s) encontrado(s) até agora.")
+                    self._definir_status(
+                        f"Processando página {atual} de {total} — {encontrados} diagrama(s) encontrado(s).",
+                        "info",
+                    )
                 elif tipo == "concluido":
                     self._concluir(dados)  # type: ignore[arg-type]
                 elif tipo == "erro":
@@ -234,8 +566,10 @@ class InterfaceExtrator:
                 elif tipo == "download_atualizacao":
                     recebido, total = dados  # type: ignore[misc]
                     self.progresso["value"] = recebido / max(1, total) * 100
-                    self.status.set("Baixando atualização...")
-                    self.detalhes.set(f"{recebido / 1024 / 1024:.1f} de {total / 1024 / 1024:.1f} MB")
+                    self._definir_status(
+                        f"Baixando atualização — {recebido / 1024 / 1024:.1f} de {total / 1024 / 1024:.1f} MB.",
+                        "info",
+                    )
                 elif tipo == "atualizacao_baixada":
                     self._instalar_atualizacao(dados)  # type: ignore[arg-type]
         except queue.Empty:
@@ -248,36 +582,74 @@ class InterfaceExtrator:
         self.progresso["value"] = 100
         self._alternar_controles(True)
         if resultado.diagramas_encontrados == 0:
-            self.status.set("Processamento concluído, mas nenhum tabuleiro foi encontrado.")
+            self.progresso["value"] = 0
+            self._definir_status("Nenhum diagrama foi encontrado no arquivo selecionado.", "warning")
             self.detalhes.set("Nenhum PDF de saída foi criado.")
-            messagebox.showwarning("Nenhum diagrama", self.status.get(), parent=self.raiz)
+            self._ocultar_acoes_resultado()
             return
-        self.status.set("Extração concluída com sucesso.")
-        self.detalhes.set(f"{resultado.diagramas_encontrados} diagrama(s) salvos em {resultado.arquivo_saida}")
-        self.botao_abrir.configure(state="normal")
-        messagebox.showinfo(
-            "Extração concluída",
-            f"{resultado.diagramas_encontrados} diagrama(s) foram extraídos.",
-            parent=self.raiz,
+        self._definir_status(
+            f"{resultado.diagramas_encontrados} diagrama(s) encontrado(s). PDF criado com sucesso.",
+            "success",
         )
+        self.detalhes.set(f"Diagramas salvos em {resultado.arquivo_saida}")
+        self._mostrar_acoes_resultado()
+        if self.abrir_ao_concluir.get():
+            self._abrir_pdf()
 
     def _mostrar_erro(self, erro: object) -> None:
         self.processando = False
         self.progresso["value"] = 0
         self._alternar_controles(True)
         mensagem = str(erro) if isinstance(erro, (ErroExtracao, Exception)) else "Erro desconhecido."
-        self.status.set("Não foi possível concluir a extração.")
+        self._definir_status("Não foi possível concluir a extração.", "danger")
         self.detalhes.set(mensagem)
-        messagebox.showerror("Erro na extração", mensagem, parent=self.raiz)
+        messagebox.showerror(
+            "Erro na extração",
+            "Não foi possível concluir a extração. Verifique o PDF e tente novamente.",
+            parent=self.raiz,
+        )
 
     def _alternar_controles(self, habilitar: bool) -> None:
-        estado = "normal" if habilitar else "disabled"
-        for controle in (self.campo_entrada, self.campo_saida, self.botao_entrada, self.botao_saida, self.botao_processar):
-            controle.configure(state=estado)
+        estado_botao = "normal" if habilitar else "disabled"
+        estado_campo = "readonly" if habilitar else "disabled"
+        self.campo_entrada.configure(state=estado_campo)
+        self.campo_saida.configure(state=estado_campo)
+        self.botao_entrada.configure(state=estado_botao)
+        self.botao_saida.configure(state=estado_botao)
+        self.checkbox_abrir.configure(state=estado_botao)
+        if habilitar:
+            self.botao_processar.configure(text="Extrair diagramas")
+            self._atualizar_estado_principal()
+        else:
+            self.botao_processar.configure(state="disabled")
+
+    def _abrir_pdf(self) -> None:
+        if (
+            self.ultimo_resultado
+            and self.ultimo_resultado.arquivo_saida
+            and self.ultimo_resultado.arquivo_saida.is_file()
+        ):
+            try:
+                os.startfile(str(self.ultimo_resultado.arquivo_saida))
+            except OSError as erro:
+                self.logger.exception("Falha ao abrir o PDF de saída.")
+                messagebox.showerror("Não foi possível abrir o PDF", str(erro), parent=self.raiz)
+        else:
+            self._definir_status("O PDF de saída não foi encontrado.", "warning")
 
     def _abrir_pasta(self) -> None:
-        if self.ultimo_resultado and self.ultimo_resultado.arquivo_saida:
-            os.startfile(str(self.ultimo_resultado.arquivo_saida.parent))
+        if (
+            self.ultimo_resultado
+            and self.ultimo_resultado.arquivo_saida
+            and self.ultimo_resultado.arquivo_saida.parent.is_dir()
+        ):
+            try:
+                os.startfile(str(self.ultimo_resultado.arquivo_saida.parent))
+            except OSError as erro:
+                self.logger.exception("Falha ao abrir a pasta de saída.")
+                messagebox.showerror("Não foi possível abrir a pasta", str(erro), parent=self.raiz)
+        else:
+            self._definir_status("A pasta do resultado não foi encontrada.", "warning")
 
     def _verificar_atualizacoes(self, silencioso: bool = False) -> None:
         if self.atualizando:
@@ -294,8 +666,7 @@ class InterfaceExtrator:
         self.verificacao_silenciosa = silencioso
         self.botao_atualizar.configure(state="disabled")
         if not silencioso:
-            self.status.set("Verificando atualizações...")
-            self.detalhes.set(f"Versão instalada: {__version__}")
+            self._definir_status("Verificando atualizações...", "info")
         threading.Thread(target=self._consultar_atualizacao, daemon=True).start()
 
     def _consultar_atualizacao(self) -> None:
@@ -303,23 +674,29 @@ class InterfaceExtrator:
             atualizacao = consultar_atualizacao(GITHUB_REPOSITORY, __version__)
             self.eventos.put(("atualizacao_disponivel" if atualizacao else "atualizacao_ausente", atualizacao))
         except Exception as erro:
+            self.logger.warning("Falha ao consultar atualizações.", exc_info=True)
             self.eventos.put(("atualizacao_erro", erro))
 
     def _oferecer_atualizacao(self, atualizacao: Atualizacao) -> None:
         self.atualizando = False
         self.botao_atualizar.configure(state="normal")
-        aceitar = messagebox.askyesno(
-            "Nova versão disponível",
-            f"A versão {atualizacao.versao} está disponível.\n\n"
-            f"Versão instalada: {__version__}\n\n"
-            "Deseja baixar e instalar agora?",
-            parent=self.raiz,
-        )
-        if not aceitar:
+        self.atualizacao_pendente = atualizacao
+        self._definir_status(f"Nova versão disponível: v{atualizacao.versao}", "info")
+        self.botao_instalar_atualizacao.grid()
+
+    def _iniciar_atualizacao_pendente(self) -> None:
+        atualizacao = self.atualizacao_pendente
+        if atualizacao is None or self.atualizando:
+            return
+        if self.processando:
+            self._definir_status("Conclua a extração antes de instalar a atualização.", "warning")
             return
         self.atualizando = True
+        self.atualizacao_pendente = None
         self.botao_atualizar.configure(state="disabled")
+        self.botao_instalar_atualizacao.grid_remove()
         self._alternar_controles(False)
+        self._definir_status(f"Baixando a versão {atualizacao.versao}...", "info")
         threading.Thread(target=self._baixar_atualizacao, args=(atualizacao,), daemon=True).start()
 
     def _baixar_atualizacao(self, atualizacao: Atualizacao) -> None:
@@ -330,29 +707,33 @@ class InterfaceExtrator:
             )
             self.eventos.put(("atualizacao_baixada", caminho))
         except Exception as erro:
+            self.logger.warning("Falha ao baixar a atualização.", exc_info=True)
             self.eventos.put(("atualizacao_erro", erro))
 
     def _atualizacao_ausente(self) -> None:
         self.atualizando = False
         self.botao_atualizar.configure(state="normal")
+        self._atualizar_estado_principal()
         if not self.verificacao_silenciosa:
-            messagebox.showinfo(
-                "Aplicativo atualizado",
-                f"Você já possui a versão mais recente ({__version__}).",
-                parent=self.raiz,
-            )
+            self._definir_status(f"Você já usa a versão mais recente (v{__version__}).", "success")
 
     def _erro_atualizacao(self, erro: object) -> None:
         self.atualizando = False
         self.botao_atualizar.configure(state="normal")
         self._alternar_controles(True)
         if not self.verificacao_silenciosa:
-            messagebox.showerror("Erro de atualização", str(erro), parent=self.raiz)
+            self._definir_status("Não foi possível verificar atualizações.", "warning")
+            messagebox.showerror(
+                "Erro de atualização",
+                "Não foi possível verificar atualizações. Confira sua conexão e tente novamente.",
+                parent=self.raiz,
+            )
 
     def _instalar_atualizacao(self, caminho: Path) -> None:
         try:
             iniciar_instalador(caminho)
         except Exception as erro:
+            self.logger.exception("Falha ao iniciar o instalador da atualização.")
             self._erro_atualizacao(erro)
             return
         messagebox.showinfo(
@@ -363,6 +744,7 @@ class InterfaceExtrator:
         self.raiz.after(300, self.raiz.destroy)
 
     def _desinstalar(self) -> None:
+        """Mantida para compatibilidade; a desinstalação fica no Windows."""
         desinstalador = localizar_desinstalador()
         if desinstalador is None:
             messagebox.showinfo(
@@ -381,17 +763,25 @@ class InterfaceExtrator:
         self.raiz.after(300, self.raiz.destroy)
 
     def _ao_fechar(self) -> None:
-        if self.processando and not messagebox.askyesno(
-            "Extração em andamento",
-            "A extração ainda está em andamento. Deseja fechar mesmo assim?",
-            parent=self.raiz,
-        ):
+        if self.processando:
+            messagebox.showwarning(
+                "Extração em andamento",
+                "Aguarde a extração terminar antes de fechar o aplicativo.",
+                parent=self.raiz,
+            )
+            return
+        if self.atualizando:
+            messagebox.showwarning(
+                "Atualização em andamento",
+                "Aguarde a atualização terminar antes de fechar o aplicativo.",
+                parent=self.raiz,
+            )
             return
         self.raiz.destroy()
 
 
 def main() -> None:
-    raiz = tk.Tk()
+    raiz = ttk.Window(themename="litera")
     InterfaceExtrator(raiz)
     raiz.mainloop()
 

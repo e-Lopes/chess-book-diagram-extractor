@@ -209,6 +209,18 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
+# Chess Book Diagram Extractor
+.build-venv/
+release/
+*.spec.bak
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
+
+# Este arquivo faz parte do processo de build do aplicativo.
+!DiagramExtractor.spec
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

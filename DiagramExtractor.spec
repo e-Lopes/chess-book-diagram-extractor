@@ -11,8 +11,8 @@ gerados = raiz / "build" / "generated"
 dados_cv2, binarios_cv2, imports_cv2 = collect_all("cv2")
 dados_ttk, binarios_ttk, imports_ttk = collect_all("ttkbootstrap")
 dados = dados_cv2 + dados_ttk + [
-    (str(raiz / "icon" / "icon.png"), "icon"),
-    (str(raiz / "icon" / "icon.ico"), "icon"),
+    (str(raiz / "icon" / "chess-book-diagram-extractor.png"), "icon"),
+    (str(raiz / "icon" / "chess-book-diagram-extractor.ico"), "icon"),
 ]
 binarios = binarios_cv2 + binarios_ttk
 imports = imports_cv2 + imports_ttk
@@ -45,7 +45,7 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     version=str(gerados / "version_info.txt"),
-    icon=str(raiz / "icon" / "icon.ico"),
+    icon=str(raiz / "icon" / "chess-book-diagram-extractor.ico"),
 )
 
 coll = COLLECT(

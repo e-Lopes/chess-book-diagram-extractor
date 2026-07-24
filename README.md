@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="icon/icon.png" alt="Ícone do Chess Book Diagram Extractor" width="170">
+  <img src="icon/chess-book-diagram-extractor.png" alt="Ícone do Chess Book Diagram Extractor" width="170">
 </p>
 
 <h1 align="center">Chess Book Diagram Extractor</h1>

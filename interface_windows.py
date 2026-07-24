@@ -87,8 +87,8 @@ class InterfaceExtrator:
         self.raiz.resizable(True, True)
         self.raiz.option_add("*Font", ("Segoe UI", 10))
 
-        caminho_ico = caminho_recurso("icon", "icon.ico")
-        caminho_png = caminho_recurso("icon", "icon.png")
+        caminho_ico = caminho_recurso("icon", "chess-book-diagram-extractor.ico")
+        caminho_png = caminho_recurso("icon", "chess-book-diagram-extractor.png")
         icone_configurado = False
         if sys.platform == "win32" and caminho_ico.is_file():
             try:

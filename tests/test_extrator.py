@@ -237,7 +237,9 @@ class TesteIntegracao(unittest.TestCase):
             validar_versao("versao-invalida")
 
     def test_icone_da_interface_existe(self) -> None:
-        self.assertTrue(caminho_recurso("icon", "icon.png").is_file())
+        self.assertTrue(
+            caminho_recurso("icon", "chess-book-diagram-extractor.png").is_file()
+        )
 
     def test_versao_publica_tem_formato_semantico(self) -> None:
         partes = __version__.split(".")

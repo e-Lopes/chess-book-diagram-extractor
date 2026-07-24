@@ -6,8 +6,8 @@ from PIL import Image
 
 
 RAIZ = Path(__file__).resolve().parents[1]
-ORIGEM = RAIZ / "icon" / "icon.png"
-DESTINO = RAIZ / "icon" / "icon.ico"
+ORIGEM = RAIZ / "icon" / "chess-book-diagram-extractor.png"
+DESTINO = RAIZ / "icon" / "chess-book-diagram-extractor.ico"
 
 
 def main() -> None:

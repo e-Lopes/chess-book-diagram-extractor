@@ -1,5 +1,7 @@
 # Chess Book Diagram Extractor
 
+[![Baixar para Windows](https://img.shields.io/badge/Baixar_para_Windows-Chess_Book_Diagram_Extractor-2457A6?style=for-the-badge&logo=windows11&logoColor=white)](https://github.com/e-Lopes/chess-book-diagram-extractor/releases/latest/download/ChessBookDiagramExtractor-Setup.exe)
+
 Aplicativo gratuito para Windows que encontra automaticamente diagramas de
 tabuleiros 8×8 em livros de xadrez em PDF. O resultado é um novo PDF A4, com
 um tabuleiro centralizado por página, pronto para imprimir ou estudar.
@@ -21,10 +23,9 @@ um tabuleiro centralizado por página, pronto para imprimir ou estudar.
 
 ## Instalar no Windows
 
-1. Abra a página **Releases** deste repositório.
-2. Na versão mais recente, baixe
-   `ChessBookDiagramExtractor-Setup-vX.Y.Z.exe`.
-3. Execute o arquivo baixado e siga o assistente.
+1. Clique em **Baixar para Windows** no início desta página.
+2. Salve e execute `ChessBookDiagramExtractor-Setup.exe`.
+3. Siga as instruções do instalador.
 4. Abra **Chess Book Diagram Extractor** pelo menu Iniciar.
 
 O programa é instalado somente para o usuário atual. Enquanto o projeto não
@@ -58,68 +59,6 @@ Use uma destas opções:
 - use **Configurações > Aplicativos > Aplicativos instalados** no Windows.
 
 O Editor exibido pelo Windows é **E-Lopes**.
-
-## Executar o código-fonte
-
-Requer Python 3.10 ou mais recente. Na raiz do repositório:
-
-```powershell
-python -m pip install -r requirements.txt
-python interface_windows.py
-```
-
-No Windows, depois de instalar as dependências, também é possível dar duplo
-clique em `Iniciar_Extrator.bat`.
-
-A versão com seletores nativos e mensagens no terminal pode ser iniciada com:
-
-```powershell
-python extrair_tabuleiros_pdf.py
-```
-
-## Testes
-
-```powershell
-python -m unittest discover -s tests -v
-```
-
-Os testes usam PDFs e imagens sintéticos em uma pasta temporária. Eles cobrem
-páginas sem diagramas, um ou vários diagramas, inclinação, duplicatas, filtros
-de falsos positivos, saída A4, atualização e situações de erro.
-
-## Gerar o EXE e o instalador
-
-O build exige Windows. O script cria `.build-venv`, instala as dependências de
-build e gera o aplicativo sem alterar o ambiente Python principal.
-
-Para gerar somente `dist/ChessBookDiagramExtractor`:
-
-```powershell
-.\Build_Windows.bat -SkipInstaller
-```
-
-Para gerar o instalador, tenha o Inno Setup 6 instalado e execute:
-
-```powershell
-.\Build_Windows.bat -Version 0.1.2 -Repository SEU_USUARIO/chess-book-diagram-extractor
-```
-
-O resultado será
-`release/ChessBookDiagramExtractor-Setup-v0.1.2.exe`. O endereço do
-repositório é incorporado ao build para habilitar as atualizações.
-
-## Publicar uma versão
-
-O workflow em `.github/workflows/windows-release.yml` executa os testes e cria
-o instalador em um runner Windows. Para publicar uma release:
-
-```powershell
-git tag v0.1.2
-git push origin v0.1.2
-```
-
-A tag `vX.Y.Z` gera automaticamente a GitHub Release e anexa o instalador com
-o nome esperado pelo atualizador.
 
 ## Limitações conhecidas
 

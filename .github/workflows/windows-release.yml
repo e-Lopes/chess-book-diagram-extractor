@@ -6,7 +6,7 @@ on:
       version:
         description: "Versão do build manual"
         required: true
-        default: "0.1.2"
+        default: "0.1.3"
   push:
     branches:
       - "main"
@@ -63,16 +63,24 @@ jobs:
         shell: pwsh
         run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=${{ steps.version.outputs.value }}" "/DMyAppPublisher=E-Lopes" "/DMyAppURL=https://github.com/${{ github.repository }}" "packaging\installer.iss"'
 
+      - name: Criar link permanente para download
+        shell: pwsh
+        run: Copy-Item "release\ChessBookDiagramExtractor-Setup-v${{ steps.version.outputs.value }}.exe" "release\ChessBookDiagramExtractor-Setup.exe"
+
       - name: Guardar instalador como artefato
         uses: actions/upload-artifact@v4
         with:
           name: ChessBookDiagramExtractor-Windows-${{ steps.version.outputs.value }}
-          path: release/ChessBookDiagramExtractor-Setup-v${{ steps.version.outputs.value }}.exe
+          path: |
+            release/ChessBookDiagramExtractor-Setup-v${{ steps.version.outputs.value }}.exe
+            release/ChessBookDiagramExtractor-Setup.exe
           if-no-files-found: error
 
       - name: Publicar GitHub Release
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v3
         with:
-          files: release/ChessBookDiagramExtractor-Setup-v${{ steps.version.outputs.value }}.exe
+          files: |
+            release/ChessBookDiagramExtractor-Setup-v${{ steps.version.outputs.value }}.exe
+            release/ChessBookDiagramExtractor-Setup.exe
           generate_release_notes: true

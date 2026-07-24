@@ -84,3 +84,12 @@ jobs:
             release/ChessBookDiagramExtractor-Setup-v${{ steps.version.outputs.value }}.exe
             release/ChessBookDiagramExtractor-Setup.exe
           generate_release_notes: true
+          body: |
+            ## Code signing policy
+
+            Free code signing provided by [SignPath.io](https://signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
+
+            Releases published before completion of the SignPath integration may be unsigned.
+
+            - [Code signing policy](https://github.com/${{ github.repository }}/blob/main/CODE_SIGNING_POLICY.md)
+            - [Privacy policy](https://github.com/${{ github.repository }}/blob/main/PRIVACY.md)

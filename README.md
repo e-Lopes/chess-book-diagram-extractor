@@ -60,6 +60,17 @@ Use uma destas opções:
 
 O Editor exibido pelo Windows é **E-Lopes**.
 
+## Segurança e transparência
+
+O código-fonte, o histórico de versões e o processo automatizado de build são
+públicos. Consulte a [Política de Privacidade](PRIVACY.md) e a
+[Code signing policy](CODE_SIGNING_POLICY.md).
+
+O projeto solicitou a assinatura gratuita fornecida por
+[SignPath.io](https://signpath.io/), com certificado da
+[SignPath Foundation](https://signpath.org/). Versões publicadas antes da
+conclusão dessa integração podem não possuir assinatura digital.
+
 ## Limitações conhecidas
 
 A detecção é visual e foi pensada para tabuleiros convencionais 8×8 com

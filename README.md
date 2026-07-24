@@ -71,6 +71,8 @@ O projeto solicitou a assinatura gratuita fornecida por
 [SignPath Foundation](https://signpath.org/). Versões publicadas antes da
 conclusão dessa integração podem não possuir assinatura digital.
 
+> Free code signing provided by SignPath.io, certificate by SignPath Foundation.
+
 ## Limitações conhecidas
 
 A detecção é visual e foi pensada para tabuleiros convencionais 8×8 com

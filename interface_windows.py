@@ -9,6 +9,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import webbrowser
 from pathlib import Path
@@ -19,7 +20,25 @@ from ttkbootstrap.style import ThemeDefinition
 from ttkbootstrap.widgets import ToolTip
 
 from autoupdate import Atualizacao, baixar_atualizacao, consultar_atualizacao, iniciar_instalador
-from extrair_tabuleiros_pdf import ErroExtracao, ResultadoExtracao, processar_pdf
+from extrair_tabuleiros_pdf import (
+    AnotacaoSaida,
+    Candidato,
+    ErroExtracao,
+    ExtracaoCancelada,
+    ResultadoExtracao,
+    carregar_diagramas_do_pdf_extraido,
+    criar_pdf_a4,
+    detectar_no_pdf,
+    processar_pdf,
+)
+from notacao_forsyth import (
+    ItemRevisao,
+    ReconhecedorForsyth,
+    RevisorAutomaticoLivro,
+    ResultadoReconhecimento,
+    remover_rascunho,
+)
+from revisor_forsyth import JanelaRevisaoForsyth
 from version import GITHUB_REPOSITORY, __version__
 
 
@@ -41,6 +60,23 @@ def carregar_preferencia_abrir_pdf() -> bool:
         return bool(dados.get("abrir_pdf_ao_concluir", True))
     except (OSError, ValueError, TypeError):
         return True
+
+
+def carregar_preferencia_incluir_forsyth() -> bool:
+    try:
+        dados = json.loads((pasta_dados_aplicativo() / "settings.json").read_text(encoding="utf-8"))
+        return bool(dados.get("incluir_notacao_forsyth", True))
+    except (OSError, ValueError, TypeError):
+        return True
+
+
+def carregar_preferencia_idioma_notacao() -> str:
+    try:
+        dados = json.loads((pasta_dados_aplicativo() / "settings.json").read_text(encoding="utf-8"))
+        idioma = dados.get("idioma_notacao", "pt")
+        return idioma if idioma in ("pt", "en") else "pt"
+    except (OSError, ValueError, TypeError):
+        return "pt"
 
 
 def configurar_logger() -> logging.Logger:
@@ -105,16 +141,23 @@ class InterfaceExtrator:
         self.entrada_exibida = tk.StringVar(value="Nenhum arquivo selecionado")
         self.saida_exibida = tk.StringVar(value="Definido após selecionar um PDF")
         self.abrir_ao_concluir = tk.BooleanVar(value=carregar_preferencia_abrir_pdf())
+        self.incluir_forsyth = tk.BooleanVar(value=carregar_preferencia_incluir_forsyth())
+        self.idioma_notacao = tk.StringVar(value=carregar_preferencia_idioma_notacao())
         self.status = tk.StringVar(value="Selecione um arquivo PDF para começar.")
+        self.texto_percentual = tk.StringVar(value="0%")
+        self.inicio_progresso: float | None = None
         # Mantida para compatibilidade com o fluxo existente, mas não é exibida.
         self.detalhes = tk.StringVar(value="Nenhum processamento em andamento.")
         self.eventos: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.cancelamento = threading.Event()
         self.processando = False
+        self.revisando = False
         self.atualizando = False
         self.verificacao_silenciosa = False
         self.ultimo_resultado: ResultadoExtracao | None = None
         self.atualizacao_pendente: Atualizacao | None = None
         self.janela_sobre: ttk.Toplevel | None = None
+        self.janela_revisao: JanelaRevisaoForsyth | None = None
         self.ultimo_diretorio = Path.cwd()
         self.logger = configurar_logger()
 
@@ -198,20 +241,19 @@ class InterfaceExtrator:
 
         ttk.Label(
             cabecalho,
-            text="Chess Book Diagram Extractor",
+            text="Extraia diagramas de livros em PDF",
             style="HeaderTitle.TLabel",
         ).grid(row=0, column=0, sticky="sw")
         ttk.Label(
             cabecalho,
-            text="Extraia diagramas 8×8 de livros em PDF",
+            text="Localize tabuleiros 8×8 e revise a notação das peças",
             style="HeaderSubtitle.TLabel",
             bootstyle="secondary",
         ).grid(row=1, column=0, sticky="nw", pady=(2, 0))
 
         self.botao_atualizar = ttk.Menubutton(
             cabecalho,
-            text="⋯",
-            width=3,
+            text="Opções",
             bootstyle="secondary outline",
             direction="below",
         )
@@ -280,15 +322,53 @@ class InterfaceExtrator:
             command=self._salvar_preferencia,
         )
         self.checkbox_abrir.pack(side="left")
+        self.checkbox_forsyth = ttk.Checkbutton(
+            opcoes,
+            text="Incluir notação Forsyth",
+            variable=self.incluir_forsyth,
+            bootstyle="primary",
+            command=self._salvar_preferencia,
+        )
+        self.checkbox_forsyth.pack(side="left", padx=(22, 0))
+        ttk.Label(opcoes, text="Idioma:", bootstyle="secondary").pack(side="left", padx=(22, 5))
+        self.radio_portugues = ttk.Radiobutton(
+            opcoes,
+            text="Português",
+            variable=self.idioma_notacao,
+            value="pt",
+            bootstyle="primary",
+            command=self._salvar_preferencia,
+        )
+        self.radio_portugues.pack(side="left")
+        self.radio_ingles = ttk.Radiobutton(
+            opcoes,
+            text="Inglês",
+            variable=self.idioma_notacao,
+            value="en",
+            bootstyle="primary",
+            command=self._salvar_preferencia,
+        )
+        self.radio_ingles.pack(side="left", padx=(8, 0))
 
     def _criar_progresso_e_acoes(self, principal: ttk.Frame) -> None:
+        linha_progresso = ttk.Frame(principal)
+        linha_progresso.grid(row=3, column=0, sticky="ew", pady=(12, 7))
+        linha_progresso.columnconfigure(0, weight=1)
         self.progresso = ttk.Progressbar(
-            principal,
+            linha_progresso,
             mode="determinate",
             maximum=100,
             bootstyle="primary thin",
         )
-        self.progresso.grid(row=3, column=0, sticky="ew", pady=(12, 7))
+        self.progresso.grid(row=0, column=0, sticky="ew")
+        ttk.Label(
+            linha_progresso,
+            textvariable=self.texto_percentual,
+            width=5,
+            anchor="e",
+            font=("Segoe UI", 9, "bold"),
+            bootstyle="secondary",
+        ).grid(row=0, column=1, padx=(10, 0))
 
         linha_status = ttk.Frame(principal)
         linha_status.grid(row=4, column=0, sticky="ew")
@@ -341,7 +421,15 @@ class InterfaceExtrator:
             state="disabled",
             bootstyle="primary",
         )
-        self.botao_processar.grid(row=0, column=2, sticky="e")
+        self.botao_processar.grid(row=0, column=3, sticky="e")
+        self.botao_cancelar = ttk.Button(
+            acoes,
+            text="Cancelar",
+            command=self._cancelar_processamento,
+            bootstyle="danger outline",
+        )
+        self.botao_cancelar.grid(row=0, column=2, sticky="e", padx=(0, 10))
+        self.botao_cancelar.grid_remove()
         self._ocultar_acoes_resultado()
 
     def _criar_rodape(self, principal: ttk.Frame) -> None:
@@ -359,13 +447,49 @@ class InterfaceExtrator:
         self.status.set(mensagem)
         self.rotulo_status.configure(bootstyle=tipo)
 
+    @staticmethod
+    def _formatar_tempo(segundos: float) -> str:
+        segundos = max(0, int(round(segundos)))
+        if segundos < 60:
+            return f"{segundos} s"
+        minutos, segundos = divmod(segundos, 60)
+        if minutos < 60:
+            return f"{minutos} min {segundos:02d} s" if segundos else f"{minutos} min"
+        horas, minutos = divmod(minutos, 60)
+        return f"{horas} h {minutos:02d} min"
+
+    def _mostrar_progresso(
+        self,
+        percentual: float,
+        mensagem: str,
+        tipo: str = "info",
+        estimar: bool = True,
+    ) -> None:
+        percentual = max(0.0, min(100.0, percentual))
+        self.progresso["value"] = percentual
+        self.texto_percentual.set(f"{percentual:.0f}%")
+        inicio = self.inicio_progresso
+        if estimar and inicio is not None and 0.5 <= percentual < 100:
+            decorrido = time.monotonic() - inicio
+            if decorrido >= 3.0:
+                restante = decorrido * (100.0 - percentual) / percentual
+                mensagem += f" — cerca de {self._formatar_tempo(restante)} restantes"
+        self._definir_status(mensagem, tipo)
+
     def _salvar_preferencia(self) -> None:
         try:
             pasta = pasta_dados_aplicativo()
             pasta.mkdir(parents=True, exist_ok=True)
             temporario = pasta / "settings.json.tmp"
             temporario.write_text(
-                json.dumps({"abrir_pdf_ao_concluir": self.abrir_ao_concluir.get()}, indent=2),
+                json.dumps(
+                    {
+                        "abrir_pdf_ao_concluir": self.abrir_ao_concluir.get(),
+                        "incluir_notacao_forsyth": self.incluir_forsyth.get(),
+                        "idioma_notacao": self.idioma_notacao.get(),
+                    },
+                    indent=2,
+                ),
                 encoding="utf-8",
             )
             temporario.replace(pasta / "settings.json")
@@ -422,7 +546,7 @@ class InterfaceExtrator:
         ).pack()
 
     def _ao_alterar_entrada(self, *_args: object) -> None:
-        if self.processando:
+        if self.processando or self.revisando:
             return
         self._atualizar_estado_principal()
 
@@ -431,7 +555,7 @@ class InterfaceExtrator:
         return entrada.is_file() and entrada.suffix.lower() == ".pdf"
 
     def _atualizar_estado_principal(self) -> None:
-        if self.processando or self.atualizando:
+        if self.processando or self.revisando or self.atualizando:
             self.botao_processar.configure(state="disabled")
             return
         entrada_valida = self._entrada_valida()
@@ -521,25 +645,244 @@ class InterfaceExtrator:
         if validado is None:
             return
         entrada, saida = validado
+        self.cancelamento.clear()
         self.processando = True
+        self.inicio_progresso = time.monotonic()
         self.ultimo_resultado = None
-        self.progresso["value"] = 0
-        self._definir_status("Preparando o livro...", "info")
+        self._mostrar_progresso(0, "Preparando o livro...", "info", estimar=False)
         self.detalhes.set("O tempo depende da quantidade de páginas.")
         self._ocultar_acoes_resultado()
         self.botao_processar.configure(text="Extraindo...")
         self._alternar_controles(False)
-        threading.Thread(target=self._processar, args=(entrada, saida), daemon=True).start()
+        if self.incluir_forsyth.get():
+            threading.Thread(
+                target=self._preparar_revisao,
+                args=(entrada, saida, self.idioma_notacao.get()),
+                daemon=True,
+            ).start()
+        else:
+            threading.Thread(target=self._processar, args=(entrada, saida), daemon=True).start()
 
     def _processar(self, entrada: str, saida: str) -> None:
         def informar(atual: int, total: int, encontrados: int) -> None:
             self.eventos.put(("progresso", (atual, total, encontrados)))
 
         try:
-            resultado = processar_pdf(entrada, saida, progresso=informar)
+            resultado = processar_pdf(
+                entrada,
+                saida,
+                progresso=informar,
+                cancelado=self.cancelamento.is_set,
+            )
             self.eventos.put(("concluido", resultado))
+        except ExtracaoCancelada:
+            self.eventos.put(("cancelado", None))
         except Exception as erro:
             self.logger.exception("Falha durante a extração do PDF.")
+            self.eventos.put(("erro", erro))
+
+    def _preparar_revisao(self, entrada: str, saida: str, idioma: str) -> None:
+        def informar(atual: int, total: int, encontrados: int) -> None:
+            self.eventos.put(("progresso_deteccao_forsyth", (atual, total, encontrados)))
+
+        try:
+            total_paginas, candidatos = detectar_no_pdf(
+                entrada,
+                progresso=informar,
+                cancelado=self.cancelamento.is_set,
+            )
+            if not candidatos:
+                self.eventos.put(("concluido", ResultadoExtracao(total_paginas, 0, None)))
+                return
+
+            # O PDF simples é concluído primeiro. A notação trabalha depois
+            # sobre as imagens efetivamente gravadas nesse documento.
+            arquivo_extraido = criar_pdf_a4(
+                candidatos,
+                saida,
+                cancelado=self.cancelamento.is_set,
+            )
+            candidatos = carregar_diagramas_do_pdf_extraido(
+                arquivo_extraido,
+                candidatos,
+                cancelado=self.cancelamento.is_set,
+            )
+            self.eventos.put(("pdf_extraido", (len(candidatos), arquivo_extraido)))
+
+            itens: list[ItemRevisao] = []
+            revisor_automatico: RevisorAutomaticoLivro | None = None
+            try:
+                reconhecedor = ReconhecedorForsyth(idioma=idioma)
+            except Exception as erro:
+                self.logger.warning("Reconhecimento Forsyth indisponível.", exc_info=True)
+                aviso = f"Sugestão automática indisponível: {erro}"
+                itens = [ItemRevisao(aviso=aviso) for _ in candidatos]
+            else:
+                reconhecidos: list[ResultadoReconhecimento | None] = []
+                for indice, candidato in enumerate(candidatos, start=1):
+                    if self.cancelamento.is_set():
+                        raise ExtracaoCancelada("A extração foi cancelada.")
+                    try:
+                        resultado = reconhecedor.reconhecer(candidato.imagem)
+                        reconhecidos.append(resultado)
+                    except Exception as erro:
+                        self.logger.warning(
+                            "Falha ao reconhecer o diagrama %s.", indice, exc_info=True
+                        )
+                        reconhecidos.append(None)
+                    self.eventos.put(("progresso_reconhecimento", (indice, len(candidatos))))
+
+                validos = [resultado for resultado in reconhecidos if resultado is not None]
+                if len(validos) == len(candidatos):
+                    revisor_automatico = RevisorAutomaticoLivro(
+                        validos,
+                        idioma=idioma,
+                        caminho_pdf=entrada,
+                        pasta_dados=pasta_dados_aplicativo(),
+                    )
+                    revisados = iter(revisor_automatico.revisar())
+                    for resultado in reconhecidos:
+                        itens.append(
+                            ItemRevisao.de_reconhecimento(next(revisados))
+                            if resultado is not None
+                            else ItemRevisao(aviso="Não foi possível sugerir a posição.")
+                        )
+                else:
+                    itens = [
+                        ItemRevisao.de_reconhecimento(resultado)
+                        if resultado is not None
+                        else ItemRevisao(aviso="Não foi possível sugerir a posição.")
+                        for resultado in reconhecidos
+                    ]
+
+            if self.cancelamento.is_set():
+                raise ExtracaoCancelada("A extração foi cancelada.")
+            self.eventos.put(
+                (
+                    "revisao_pronta",
+                    (
+                        total_paginas,
+                        candidatos,
+                        itens,
+                        entrada,
+                        saida,
+                        idioma,
+                        revisor_automatico,
+                    ),
+                )
+            )
+        except ExtracaoCancelada:
+            self.eventos.put(("cancelado", None))
+        except Exception as erro:
+            self.logger.exception("Falha durante a preparação da revisão Forsyth.")
+            self.eventos.put(("erro", erro))
+
+    def _abrir_revisao(
+        self,
+        dados: tuple[
+            int,
+            list[Candidato],
+            list[ItemRevisao],
+            str,
+            str,
+            str,
+            RevisorAutomaticoLivro | None,
+        ],
+    ) -> None:
+        total_paginas, candidatos, itens, entrada, saida, idioma, revisor_automatico = dados
+        self.processando = False
+        self.revisando = True
+        self.botao_cancelar.grid_remove()
+        self.botao_processar.configure(text="Visualizando...")
+        self._mostrar_progresso(
+            100,
+            f"{len(candidatos)} diagrama(s) pronto(s) para visualização.",
+            "info",
+            estimar=False,
+        )
+
+        def finalizar(anotacoes: list[AnotacaoSaida]) -> None:
+            self.janela_revisao = None
+            self.revisando = False
+            self.processando = True
+            self.inicio_progresso = time.monotonic()
+            self.cancelamento.clear()
+            self.botao_cancelar.configure(state="normal")
+            self.botao_cancelar.grid()
+            self._mostrar_progresso(0, "Gerando o PDF revisado...", "info", estimar=False)
+            threading.Thread(
+                target=self._gerar_pdf_revisado,
+                args=(total_paginas, candidatos, anotacoes, entrada, saida),
+                daemon=True,
+            ).start()
+
+        def cancelar() -> None:
+            self.janela_revisao = None
+            self.revisando = False
+            self._mostrar_progresso(0, "Visualização pausada.", "warning", estimar=False)
+            self.ultimo_resultado = ResultadoExtracao(
+                total_paginas,
+                len(candidatos),
+                Path(saida),
+            )
+            self._alternar_controles(True)
+            self._mostrar_acoes_resultado()
+            self._definir_status(
+                "Visualização pausada. O PDF de extrações está salvo e o rascunho foi mantido.",
+                "warning",
+            )
+
+        try:
+            self.janela_revisao = JanelaRevisaoForsyth(
+                self.raiz,
+                candidatos,
+                itens,
+                entrada,
+                pasta_dados_aplicativo(),
+                idioma,
+                revisor_automatico,
+                finalizar,
+                cancelar,
+                self.logger,
+            )
+        except Exception as erro:
+            self.revisando = False
+            self._mostrar_erro(erro)
+
+    def _gerar_pdf_revisado(
+        self,
+        total_paginas: int,
+        candidatos: list[Candidato],
+        anotacoes: list[AnotacaoSaida],
+        entrada: str,
+        saida: str,
+    ) -> None:
+        try:
+            arquivo_saida = criar_pdf_a4(
+                candidatos,
+                saida,
+                anotacoes=anotacoes,
+                cancelado=self.cancelamento.is_set,
+            )
+            mantidas = [anotacao for anotacao in anotacoes if not anotacao.excluir]
+            confirmadas = sum(anotacao.posicao is not None for anotacao in mantidas)
+            remover_rascunho(entrada, pasta_dados_aplicativo())
+            self.eventos.put(
+                (
+                    "concluido",
+                    ResultadoExtracao(
+                        total_paginas,
+                        len(mantidas),
+                        arquivo_saida,
+                        confirmadas,
+                        len(mantidas) - confirmadas,
+                    ),
+                )
+            )
+        except ExtracaoCancelada:
+            self.eventos.put(("cancelado", None))
+        except Exception as erro:
+            self.logger.exception("Falha ao gerar o PDF revisado.")
             self.eventos.put(("erro", erro))
 
     def _verificar_eventos(self) -> None:
@@ -548,15 +891,48 @@ class InterfaceExtrator:
                 tipo, dados = self.eventos.get_nowait()
                 if tipo == "progresso":
                     atual, total, encontrados = dados  # type: ignore[misc]
-                    self.progresso["value"] = atual / max(1, total) * 100
-                    self._definir_status(
+                    percentual = atual / max(1, total) * 100
+                    self._mostrar_progresso(
+                        percentual,
                         f"Processando página {atual} de {total} — {encontrados} diagrama(s) encontrado(s).",
                         "info",
                     )
+                elif tipo == "progresso_deteccao_forsyth":
+                    atual, total, encontrados = dados  # type: ignore[misc]
+                    percentual = atual / max(1, total) * 55
+                    self._mostrar_progresso(
+                        percentual,
+                        f"Localizando diagramas: página {atual} de {total} — {encontrados} encontrado(s).",
+                        "info",
+                    )
+                elif tipo == "progresso_reconhecimento":
+                    atual, total = dados  # type: ignore[misc]
+                    percentual = 60 + atual / max(1, total) * 40
+                    self._mostrar_progresso(
+                        percentual,
+                        f"Sugerindo posições: diagrama {atual} de {total}.", "info"
+                    )
+                elif tipo == "pdf_extraido":
+                    quantidade, _arquivo = dados  # type: ignore[misc]
+                    self._mostrar_progresso(
+                        60,
+                        f"PDF com {quantidade} extração(ões) criado. Iniciando a notação...",
+                        "info",
+                    )
+                elif tipo == "revisao_pronta":
+                    if self.cancelamento.is_set():
+                        self._concluir_cancelamento()
+                    else:
+                        self._abrir_revisao(dados)  # type: ignore[arg-type]
                 elif tipo == "concluido":
-                    self._concluir(dados)  # type: ignore[arg-type]
+                    if self.cancelamento.is_set():
+                        self._concluir_cancelamento()
+                    else:
+                        self._concluir(dados)  # type: ignore[arg-type]
                 elif tipo == "erro":
                     self._mostrar_erro(dados)  # type: ignore[arg-type]
+                elif tipo == "cancelado":
+                    self._concluir_cancelamento()
                 elif tipo == "atualizacao_disponivel":
                     self._oferecer_atualizacao(dados)  # type: ignore[arg-type]
                 elif tipo == "atualizacao_ausente":
@@ -565,10 +941,11 @@ class InterfaceExtrator:
                     self._erro_atualizacao(dados)  # type: ignore[arg-type]
                 elif tipo == "download_atualizacao":
                     recebido, total = dados  # type: ignore[misc]
-                    self.progresso["value"] = recebido / max(1, total) * 100
-                    self._definir_status(
+                    self._mostrar_progresso(
+                        recebido / max(1, total) * 100,
                         f"Baixando atualização — {recebido / 1024 / 1024:.1f} de {total / 1024 / 1024:.1f} MB.",
                         "info",
+                        estimar=False,
                     )
                 elif tipo == "atualizacao_baixada":
                     self._instalar_atualizacao(dados)  # type: ignore[arg-type]
@@ -578,19 +955,26 @@ class InterfaceExtrator:
 
     def _concluir(self, resultado: ResultadoExtracao) -> None:
         self.processando = False
+        self.botao_cancelar.grid_remove()
         self.ultimo_resultado = resultado
-        self.progresso["value"] = 100
+        self._mostrar_progresso(100, "Processamento concluído.", "success", estimar=False)
         self._alternar_controles(True)
         if resultado.diagramas_encontrados == 0:
-            self.progresso["value"] = 0
+            self._mostrar_progresso(0, "Nenhum diagrama foi encontrado.", "warning", estimar=False)
             self._definir_status("Nenhum diagrama foi encontrado no arquivo selecionado.", "warning")
             self.detalhes.set("Nenhum PDF de saída foi criado.")
             self._ocultar_acoes_resultado()
             return
-        self._definir_status(
-            f"{resultado.diagramas_encontrados} diagrama(s) encontrado(s). PDF criado com sucesso.",
-            "success",
-        )
+        if resultado.anotacoes_confirmadas or resultado.anotacoes_pendentes:
+            mensagem = (
+                f"{resultado.diagramas_encontrados} diagrama(s); "
+                f"{resultado.anotacoes_confirmadas} posição(ões) confirmada(s). PDF criado com sucesso."
+            )
+        else:
+            mensagem = (
+                f"{resultado.diagramas_encontrados} diagrama(s) encontrado(s). PDF criado com sucesso."
+            )
+        self._definir_status(mensagem, "success")
         self.detalhes.set(f"Diagramas salvos em {resultado.arquivo_saida}")
         self._mostrar_acoes_resultado()
         if self.abrir_ao_concluir.get():
@@ -598,7 +982,8 @@ class InterfaceExtrator:
 
     def _mostrar_erro(self, erro: object) -> None:
         self.processando = False
-        self.progresso["value"] = 0
+        self.botao_cancelar.grid_remove()
+        self._mostrar_progresso(0, "Não foi possível concluir a extração.", "danger", estimar=False)
         self._alternar_controles(True)
         mensagem = str(erro) if isinstance(erro, (ErroExtracao, Exception)) else "Erro desconhecido."
         self._definir_status("Não foi possível concluir a extração.", "danger")
@@ -609,6 +994,25 @@ class InterfaceExtrator:
             parent=self.raiz,
         )
 
+    def _cancelar_processamento(self) -> None:
+        if not self.processando or self.cancelamento.is_set():
+            return
+        self.cancelamento.set()
+        self.botao_cancelar.configure(state="disabled")
+        self._definir_status("Cancelando a extração com segurança...", "warning")
+        self.detalhes.set("A etapa atual será encerrada assim que possível.")
+
+    def _concluir_cancelamento(self) -> None:
+        self.processando = False
+        self.cancelamento.clear()
+        self.ultimo_resultado = None
+        self.botao_cancelar.grid_remove()
+        self._alternar_controles(True)
+        self._mostrar_progresso(0, "Extração cancelada.", "warning", estimar=False)
+        self._definir_status("A extração foi cancelada.", "warning")
+        self.detalhes.set("Nenhum arquivo incompleto foi criado.")
+        self._ocultar_acoes_resultado()
+
     def _alternar_controles(self, habilitar: bool) -> None:
         estado_botao = "normal" if habilitar else "disabled"
         estado_campo = "readonly" if habilitar else "disabled"
@@ -617,11 +1021,17 @@ class InterfaceExtrator:
         self.botao_entrada.configure(state=estado_botao)
         self.botao_saida.configure(state=estado_botao)
         self.checkbox_abrir.configure(state=estado_botao)
+        self.checkbox_forsyth.configure(state=estado_botao)
+        self.radio_portugues.configure(state=estado_botao)
+        self.radio_ingles.configure(state=estado_botao)
         if habilitar:
+            self.botao_cancelar.grid_remove()
             self.botao_processar.configure(text="Extrair diagramas")
             self._atualizar_estado_principal()
         else:
             self.botao_processar.configure(state="disabled")
+            self.botao_cancelar.configure(state="normal")
+            self.botao_cancelar.grid()
 
     def _abrir_pdf(self) -> None:
         if (
@@ -688,7 +1098,7 @@ class InterfaceExtrator:
         atualizacao = self.atualizacao_pendente
         if atualizacao is None or self.atualizando:
             return
-        if self.processando:
+        if self.processando or self.revisando:
             self._definir_status("Conclua a extração antes de instalar a atualização.", "warning")
             return
         self.atualizando = True
@@ -763,10 +1173,10 @@ class InterfaceExtrator:
         self.raiz.after(300, self.raiz.destroy)
 
     def _ao_fechar(self) -> None:
-        if self.processando:
+        if self.processando or self.revisando:
             messagebox.showwarning(
-                "Extração em andamento",
-                "Aguarde a extração terminar antes de fechar o aplicativo.",
+                "Processamento em andamento",
+                "Conclua ou feche a revisão antes de sair do aplicativo.",
                 parent=self.raiz,
             )
             return

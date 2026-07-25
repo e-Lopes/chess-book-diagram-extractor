@@ -13,9 +13,12 @@ dados_ttk, binarios_ttk, imports_ttk = collect_all("ttkbootstrap")
 dados = dados_cv2 + dados_ttk + [
     (str(raiz / "icon" / "chess-book-diagram-extractor.png"), "icon"),
     (str(raiz / "icon" / "chess-book-diagram-extractor.ico"), "icon"),
+    (str(raiz / "models" / "chess-tiles-v2.onnx"), "models"),
+    (str(raiz / "licenses" / "fenshot-LICENSE.txt"), "licenses"),
+    (str(raiz / "THIRD_PARTY_NOTICES.md"), "."),
 ]
 binarios = binarios_cv2 + binarios_ttk
-imports = imports_cv2 + imports_ttk
+imports = imports_cv2 + imports_ttk + ["onnxruntime"]
 
 a = Analysis(
     [str(raiz / "interface_windows.py")],

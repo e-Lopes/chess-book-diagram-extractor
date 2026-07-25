@@ -17,11 +17,11 @@ VSVersionInfo(
         [
           StringStruct(u'CompanyName', u'E-Lopes'),
           StringStruct(u'FileDescription', u'Chess Book Diagram Extractor'),
-          StringStruct(u'FileVersion', u'0.1.4'),
+          StringStruct(u'FileVersion', u'0.2.0'),
           StringStruct(u'InternalName', u'ChessBookDiagramExtractor'),
           StringStruct(u'OriginalFilename', u'ChessBookDiagramExtractor.exe'),
           StringStruct(u'ProductName', u'Chess Book Diagram Extractor'),
-          StringStruct(u'ProductVersion', u'0.1.4')
+          StringStruct(u'ProductVersion', u'0.2.0')
         ]
       )
     ]),

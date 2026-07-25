@@ -7,7 +7,9 @@ import importlib.util
 import hashlib
 import io
 import json
+import threading
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import cv2
 import fitz
@@ -20,8 +22,11 @@ sys.path.insert(0, str(PASTA_MODULO))
 from extrair_tabuleiros_pdf import (  # noqa: E402
     Candidato,
     ErroExtracao,
+    ExtracaoCancelada,
     LIMIAR_PADRAO,
     criar_pdf_a4,
+    carregar_diagramas_do_pdf_extraido,
+    detectar_no_pdf,
     detectar_tabuleiros,
     executar_com_interface,
     pontuar_tabuleiro,
@@ -29,7 +34,7 @@ from extrair_tabuleiros_pdf import (  # noqa: E402
     remover_duplicados,
 )
 from autoupdate import Atualizacao, ErroAtualizacao, baixar_atualizacao, chave_versao, consultar_atualizacao  # noqa: E402
-from interface_windows import caminho_recurso, sugerir_saida  # noqa: E402
+from interface_windows import InterfaceExtrator, caminho_recurso, sugerir_saida  # noqa: E402
 from version import PUBLISHER, __version__  # noqa: E402
 
 _spec_metadata = importlib.util.spec_from_file_location(
@@ -180,8 +185,74 @@ class TesteDetector(unittest.TestCase):
         self.assertEqual(len(resultado), 1)
         self.assertEqual(resultado[0].confianca, 0.9)
 
+    def test_padrao_alternado_recupera_pagina_incompleta(self) -> None:
+        with tempfile.TemporaryDirectory() as pasta:
+            entrada = Path(pasta) / "alternado.pdf"
+            documento = fitz.open()
+            for _ in range(10):
+                documento.new_page(width=800, height=1100)
+            documento.save(entrada)
+            documento.close()
+
+            imagem = criar_tabuleiro()
+
+            def candidato(pagina: int, y: float) -> Candidato:
+                quadro = np.array([[10, y], [300, y], [300, y + 290], [10, y + 290]], np.float32)
+                return Candidato(pagina, quadro, imagem, 0.42)
+
+            def detectar(_imagem, pagina=1, alta_sensibilidade=False, **_kwargs):
+                if pagina % 2 == 0:
+                    return []
+                if pagina == 5 and not alta_sensibilidade:
+                    return [candidato(pagina, 10)]
+                return [candidato(pagina, 10), candidato(pagina, 400)]
+
+            with (
+                patch("extrair_tabuleiros_pdf.renderizar_pagina", return_value=imagem),
+                patch("extrair_tabuleiros_pdf.detectar_tabuleiros", side_effect=detectar),
+            ):
+                total, encontrados = detectar_no_pdf(entrada)
+
+            self.assertEqual(total, 10)
+            self.assertEqual(len(encontrados), 10)
+            self.assertEqual(sum(item.pagina == 5 for item in encontrados), 2)
+
 
 class TesteIntegracao(unittest.TestCase):
+    def test_cancelamento_interrompe_deteccao_e_geracao(self) -> None:
+        with tempfile.TemporaryDirectory() as pasta:
+            entrada = Path(pasta) / "livro.pdf"
+            documento = fitz.open()
+            documento.new_page()
+            documento.save(entrada)
+            documento.close()
+            with self.assertRaises(ExtracaoCancelada):
+                detectar_no_pdf(entrada, dpi=72, cancelado=lambda: True)
+
+            imagem = np.full((80, 80, 3), 255, dtype=np.uint8)
+            quadro = np.array([[0, 0], [79, 0], [79, 79], [0, 79]], np.float32)
+            saida = Path(pasta) / "cancelado.pdf"
+            with self.assertRaises(ExtracaoCancelada):
+                criar_pdf_a4(
+                    [Candidato(1, quadro, imagem, 0.9)],
+                    saida,
+                    cancelado=lambda: True,
+                )
+            self.assertFalse(saida.exists())
+
+    def test_botao_cancelar_apenas_sinaliza_a_thread_de_trabalho(self) -> None:
+        interface = InterfaceExtrator.__new__(InterfaceExtrator)
+        interface.processando = True
+        interface.cancelamento = threading.Event()
+        interface.botao_cancelar = MagicMock()
+        interface._definir_status = MagicMock()
+        interface.detalhes = MagicMock()
+
+        interface._cancelar_processamento()
+
+        self.assertTrue(interface.cancelamento.is_set())
+        interface.botao_cancelar.configure.assert_called_once_with(state="disabled")
+
     def test_editor_publico(self) -> None:
         self.assertEqual(PUBLISHER, "E-Lopes")
 
@@ -255,6 +326,11 @@ class TesteIntegracao(unittest.TestCase):
         self.assertEqual(sugestao_acentuada.name, "posição final_diagramas.pdf")
         self.assertEqual(sugestao_acentuada.parent.name, "Meus Livros")
 
+    def test_interface_formata_estimativa_de_tempo(self) -> None:
+        self.assertEqual(InterfaceExtrator._formatar_tempo(42), "42 s")
+        self.assertEqual(InterfaceExtrator._formatar_tempo(75), "1 min 15 s")
+        self.assertEqual(InterfaceExtrator._formatar_tempo(3660), "1 h 01 min")
+
     def test_pdf_sintetico_gera_um_diagrama_por_pagina_a4(self) -> None:
         with tempfile.TemporaryDirectory() as pasta:
             entrada = Path(pasta) / "livro.pdf"
@@ -280,8 +356,18 @@ class TesteIntegracao(unittest.TestCase):
                     self.assertAlmostEqual(pagina.rect.width, fitz.paper_size("a4")[0], places=1)
                     self.assertAlmostEqual(pagina.rect.height, fitz.paper_size("a4")[1], places=1)
                     self.assertEqual(len(pagina.get_images(full=True)), 1)
+                    self.assertIn("Página original (do pdf):", pagina.get_text())
+                    self.assertIn("Confiança da detecção:", pagina.get_text())
             finally:
                 pdf_saida.close()
+
+            _total, originais = detectar_no_pdf(entrada, dpi=72)
+            relidos = carregar_diagramas_do_pdf_extraido(saida, originais)
+            self.assertEqual(len(relidos), len(originais))
+            for original, relido in zip(originais, relidos):
+                self.assertEqual(relido.pagina, original.pagina)
+                self.assertEqual(relido.imagem.shape, original.imagem.shape)
+                self.assertTrue(np.array_equal(relido.imagem, original.imagem))
 
     def test_nenhum_diagrama_nao_cria_saida(self) -> None:
         with tempfile.TemporaryDirectory() as pasta:

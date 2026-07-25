@@ -212,6 +212,7 @@ tempCodeRunnerFile.py
 # Chess Book Diagram Extractor
 .build-venv/
 release/
+books/
 *.spec.bak
 .idea/
 .vscode/

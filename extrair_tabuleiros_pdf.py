@@ -19,12 +19,22 @@ import numpy as np
 
 
 DPI_PADRAO = 240
-LIMIAR_PADRAO = 0.24
+LIMIAR_PADRAO = 0.20
+LIMIAR_ALTA_SENSIBILIDADE = 0.15
 TAMANHO_A4 = fitz.paper_size("a4")
 
 
 class ErroExtracao(RuntimeError):
     """Erro que pode ser apresentado diretamente para a pessoa usuaria."""
+
+
+class ExtracaoCancelada(ErroExtracao):
+    """Interrupção solicitada pela pessoa usuária."""
+
+
+def _verificar_cancelamento(cancelado: Callable[[], bool] | None) -> None:
+    if cancelado is not None and cancelado():
+        raise ExtracaoCancelada("A extração foi cancelada.")
 
 
 @dataclass
@@ -44,10 +54,20 @@ class Candidato:
 
 
 @dataclass(frozen=True)
+class AnotacaoSaida:
+    posicao: str | None
+    girado: bool = False
+    possivel_falso_positivo: bool = False
+    excluir: bool = False
+
+
+@dataclass(frozen=True)
 class ResultadoExtracao:
     paginas_processadas: int
     diagramas_encontrados: int
     arquivo_saida: Path | None
+    anotacoes_confirmadas: int = 0
+    anotacoes_pendentes: int = 0
 
 
 def _ordenar_pontos(pontos: np.ndarray) -> np.ndarray:
@@ -193,7 +213,7 @@ def _cobertura_casas_escuras(cinza: np.ndarray) -> float:
     return max(float(np.median(coberturas[paridade])), float(np.median(coberturas[~paridade])))
 
 
-def pontuar_tabuleiro(recorte: np.ndarray) -> float:
+def pontuar_tabuleiro(recorte: np.ndarray, alta_sensibilidade: bool = False) -> float:
     """Retorna uma confianca entre 0 e 1 para a estrutura de tabuleiro 8x8."""
     if recorte.size == 0 or min(recorte.shape[:2]) < 64:
         return 0.0
@@ -203,7 +223,14 @@ def pontuar_tabuleiro(recorte: np.ndarray) -> float:
 
     # A alternancia bidimensional e obrigatoria. Molduras, fotografias de uma
     # peca e tabelas de texto nao podem compensar a ausencia desta estrutura.
-    if correlacao < 0.34 or contraste < 0.028 or consistencia < 0.62:
+    minimo_correlacao = 0.21 if alta_sensibilidade else 0.34
+    minimo_contraste = 0.018 if alta_sensibilidade else 0.028
+    minimo_consistencia = 0.55 if alta_sensibilidade else 0.62
+    if (
+        correlacao < minimo_correlacao
+        or contraste < minimo_contraste
+        or consistencia < minimo_consistencia
+    ):
         return 0.0
 
     cinza = cv2.equalizeHist(cinza_original)
@@ -226,7 +253,9 @@ def pontuar_tabuleiro(recorte: np.ndarray) -> float:
     cobertura = _cobertura_casas_escuras(cinza)
     # Uma moldura completa OU casas realmente preenchidas e obrigatoria. Isso
     # rejeita tabelas 8x8 de texto, mesmo quando o negrito alterna por paridade.
-    if continuidade < 0.32 and cobertura < 0.20:
+    minimo_continuidade = 0.24 if alta_sensibilidade else 0.32
+    minimo_cobertura = 0.14 if alta_sensibilidade else 0.20
+    if continuidade < minimo_continuidade and cobertura < minimo_cobertura:
         return 0.0
 
     # O contraste recebe limite para que livros com casas apenas pontilhadas
@@ -329,11 +358,16 @@ def remover_duplicados(candidatos: Sequence[Candidato], limite_iou: float = 0.55
     return sorted(mantidos, key=lambda item: (item.pagina, item.y, item.x))
 
 
-def detectar_tabuleiros(imagem: np.ndarray, pagina: int = 1, limiar: float = LIMIAR_PADRAO) -> list[Candidato]:
+def detectar_tabuleiros(
+    imagem: np.ndarray,
+    pagina: int = 1,
+    limiar: float = LIMIAR_PADRAO,
+    alta_sensibilidade: bool = False,
+) -> list[Candidato]:
     encontrados: list[Candidato] = []
     for quadro in _quadros_candidatos(imagem):
         recorte = corrigir_perspectiva(imagem, quadro)
-        confianca = pontuar_tabuleiro(recorte)
+        confianca = pontuar_tabuleiro(recorte, alta_sensibilidade=alta_sensibilidade)
         if confianca >= limiar:
             encontrados.append(Candidato(pagina, quadro, recorte, confianca))
     return remover_duplicados(encontrados)
@@ -352,6 +386,7 @@ def detectar_no_pdf(
     caminho_pdf: os.PathLike[str] | str,
     dpi: int = DPI_PADRAO,
     progresso: Callable[[int, int, int], None] | None = None,
+    cancelado: Callable[[], bool] | None = None,
 ) -> tuple[int, list[Candidato]]:
     caminho = Path(caminho_pdf)
     if not caminho.is_file():
@@ -367,22 +402,97 @@ def detectar_no_pdf(
         if documento.needs_pass:
             raise ErroExtracao("O PDF esta protegido por senha.")
 
-        encontrados: list[Candidato] = []
+        encontrados_por_pagina: dict[int, list[Candidato]] = {}
         total = documento.page_count
         print(f"Processando {total} pagina(s)...")
         for indice, pagina in enumerate(documento, start=1):
+            _verificar_cancelamento(cancelado)
             imagem = renderizar_pagina(pagina, dpi)
             candidatos = detectar_tabuleiros(imagem, pagina=indice)
-            encontrados.extend(candidatos)
+            _verificar_cancelamento(cancelado)
+            encontrados_por_pagina[indice] = candidatos
             print(f"Pagina {indice}/{total}: {len(candidatos)} diagrama(s)")
             if progresso is not None:
-                progresso(indice, total, len(encontrados))
+                progresso(
+                    indice,
+                    total,
+                    sum(len(itens) for itens in encontrados_por_pagina.values()),
+                )
+
+        # Livros de problemas frequentemente alternam uma pagina com dois
+        # diagramas e outra apenas com texto. Quando esse padrao aparece de
+        # forma clara, fazemos uma segunda passagem somente nas paginas que
+        # deveriam ter diagramas mas ficaram incompletas. Essa recuperacao
+        # privilegia nao perder problemas, sem relaxar o livro inteiro.
+        paginas_com_dois = [
+            numero for numero, itens in encontrados_por_pagina.items() if len(itens) >= 2
+        ]
+        contagem_paridade = {
+            0: sum(numero % 2 == 0 for numero in paginas_com_dois),
+            1: sum(numero % 2 == 1 for numero in paginas_com_dois),
+        }
+        total_referencia = sum(contagem_paridade.values())
+        paridade_diagramas = max(contagem_paridade, key=contagem_paridade.get)
+        padrao_alternado = (
+            total_referencia >= 4
+            and contagem_paridade[paridade_diagramas] / total_referencia >= 0.80
+        )
+        if padrao_alternado:
+            recuperados = 0
+            for numero in range(1, total + 1):
+                _verificar_cancelamento(cancelado)
+                atuais = encontrados_por_pagina.get(numero, [])
+                if numero % 2 != paridade_diagramas or len(atuais) >= 2:
+                    continue
+                imagem = renderizar_pagina(documento.load_page(numero - 1), dpi)
+                sensiveis = detectar_tabuleiros(
+                    imagem,
+                    pagina=numero,
+                    limiar=LIMIAR_ALTA_SENSIBILIDADE,
+                    alta_sensibilidade=True,
+                )
+                combinados = remover_duplicados([*atuais, *sensiveis])
+                if len(combinados) > len(atuais):
+                    recuperados += len(combinados) - len(atuais)
+                    encontrados_por_pagina[numero] = combinados
+                    print(
+                        f"Pagina {numero}: recuperados {len(combinados) - len(atuais)} "
+                        "diagrama(s) em alta sensibilidade"
+                    )
+            if recuperados:
+                print(f"Recuperacao por padrao alternado: {recuperados} diagrama(s)")
+
+    encontrados = [
+        candidato
+        for numero in sorted(encontrados_por_pagina)
+        for candidato in encontrados_por_pagina[numero]
+    ]
     return total, sorted(encontrados, key=lambda item: (item.pagina, item.y, item.x))
 
 
-def criar_pdf_a4(candidatos: Sequence[Candidato], caminho_saida: os.PathLike[str] | str) -> Path:
+def criar_pdf_a4(
+    candidatos: Sequence[Candidato],
+    caminho_saida: os.PathLike[str] | str,
+    anotacoes: Sequence[AnotacaoSaida] | None = None,
+    cancelado: Callable[[], bool] | None = None,
+) -> Path:
     if not candidatos:
         raise ErroExtracao("Nenhum tabuleiro foi encontrado; o PDF de saida nao foi criado.")
+    if anotacoes is not None and len(anotacoes) != len(candidatos):
+        raise ErroExtracao("A quantidade de anotações não corresponde aos diagramas encontrados.")
+
+    candidatos_pdf = list(candidatos)
+    anotacoes_pdf = list(anotacoes) if anotacoes is not None else None
+    if anotacoes_pdf is not None:
+        mantidos = [
+            (candidato, anotacao)
+            for candidato, anotacao in zip(candidatos_pdf, anotacoes_pdf)
+            if not anotacao.excluir
+        ]
+        if not mantidos:
+            raise ErroExtracao("Todos os recortes foram marcados como não sendo tabuleiros.")
+        candidatos_pdf = [candidato for candidato, _anotacao in mantidos]
+        anotacoes_pdf = [anotacao for _candidato, anotacao in mantidos]
 
     saida = Path(caminho_saida).expanduser().resolve()
     if saida.suffix.lower() != ".pdf":
@@ -397,13 +507,103 @@ def criar_pdf_a4(candidatos: Sequence[Candidato], caminho_saida: os.PathLike[str
     y0 = (altura_a4 - lado) / 2
     destino = fitz.Rect(x0, y0, x0 + lado, y0 + lado)
 
+    def inserir_texto_centralizado(
+        pagina: fitz.Page,
+        texto: str,
+        y: float,
+        tamanho_fonte: float = 9.0,
+        fonte: str = "cour",
+        tamanho_minimo: float = 7.0,
+    ) -> None:
+        largura_texto = fitz.get_text_length(texto, fontname=fonte, fontsize=tamanho_fonte)
+        if largura_texto > largura_a4 - 2 * margem:
+            tamanho_fonte = max(
+                tamanho_minimo,
+                tamanho_fonte * (largura_a4 - 2 * margem) / largura_texto,
+            )
+            largura_texto = fitz.get_text_length(texto, fontname=fonte, fontsize=tamanho_fonte)
+        x_texto = max(margem, (largura_a4 - largura_texto) / 2)
+        pagina.insert_text(
+            fitz.Point(x_texto, y),
+            texto,
+            fontname=fonte,
+            fontsize=tamanho_fonte,
+            color=(0.10, 0.13, 0.18),
+        )
+
     try:
-        for candidato in candidatos:
+        for indice, candidato in enumerate(candidatos_pdf):
+            _verificar_cancelamento(cancelado)
             pagina = documento.new_page(width=largura_a4, height=altura_a4)
-            sucesso, buffer = cv2.imencode(".png", candidato.imagem)
+            anotacao = anotacoes_pdf[indice] if anotacoes_pdf is not None else None
+            imagem = cv2.rotate(candidato.imagem, cv2.ROTATE_180) if anotacao and anotacao.girado else candidato.imagem
+            sucesso, buffer = cv2.imencode(".png", imagem)
             if not sucesso:
                 raise ErroExtracao("Falha ao codificar um dos diagramas.")
             pagina.insert_image(destino, stream=buffer.tobytes(), keep_proportion=True)
+            if anotacao is not None:
+                conteudo = anotacao.posicao if anotacao.posicao else "posição não informada"
+                inserir_texto_centralizado(
+                    pagina,
+                    f"{conteudo}",
+                    y0 - 18,
+                    tamanho_fonte=13.0,
+                    fonte="cobo",
+                    tamanho_minimo=10.0,
+                )
+
+            inserir_texto_centralizado(
+                pagina,
+                f"Página original (do pdf): {candidato.pagina}",
+                destino.y1 + 24,
+                tamanho_fonte=13.0,
+                fonte="hebo",
+                tamanho_minimo=11.0,
+            )
+            if anotacao is not None and anotacao.possivel_falso_positivo:
+                inserir_texto_centralizado(
+                    pagina,
+                    "Possível falso positivo: talvez este recorte não seja um tabuleiro.",
+                    destino.y1 + 46,
+                    tamanho_fonte=10.0,
+                    fonte="hebo",
+                    tamanho_minimo=8.0,
+                )
+            if anotacoes is None:
+                inserir_texto_centralizado(
+                    pagina,
+                    f"Confiança da detecção: {candidato.confianca * 100:.1f}%",
+                    destino.y1 + 42,
+                    tamanho_fonte=9.0,
+                    fonte="helv",
+                )
+
+        if anotacoes_pdf is not None:
+            # Acrescenta um índice textual na mesma ordem das páginas dos
+            # diagramas. A lista continua em novas páginas quando necessário,
+            # preservando uma posição por linha e sem prefixos ou numeração.
+            margem_indice = 42.0
+            tamanho_fonte = 9.0
+            altura_linha = 13.0
+            y_inicial = margem_indice + tamanho_fonte
+            y_limite = altura_a4 - margem_indice
+            pagina_indice: fitz.Page | None = None
+            y_linha = y_inicial
+
+            for anotacao in anotacoes_pdf:
+                _verificar_cancelamento(cancelado)
+                if pagina_indice is None or y_linha > y_limite:
+                    pagina_indice = documento.new_page(width=largura_a4, height=altura_a4)
+                    y_linha = y_inicial
+                texto = anotacao.posicao or "posição não informada"
+                pagina_indice.insert_text(
+                    fitz.Point(margem_indice, y_linha),
+                    texto,
+                    fontname="cour",
+                    fontsize=tamanho_fonte,
+                    color=(0.10, 0.13, 0.18),
+                )
+                y_linha += altura_linha
 
         descritor, temporario = tempfile.mkstemp(prefix="diagramas_", suffix=".pdf", dir=saida.parent)
         os.close(descritor)
@@ -418,16 +618,62 @@ def criar_pdf_a4(candidatos: Sequence[Candidato], caminho_saida: os.PathLike[str
     return saida
 
 
+def carregar_diagramas_do_pdf_extraido(
+    caminho_pdf: os.PathLike[str] | str,
+    originais: Sequence[Candidato],
+    cancelado: Callable[[], bool] | None = None,
+) -> list[Candidato]:
+    """Relê do PDF de extração a imagem usada em cada página A4."""
+    caminho = Path(caminho_pdf)
+    try:
+        documento = fitz.open(caminho)
+    except Exception as erro:
+        raise ErroExtracao(f"Não foi possível reler o PDF extraído: {erro}") from erro
+
+    with documento:
+        if documento.page_count != len(originais):
+            raise ErroExtracao("O PDF extraído não corresponde aos diagramas detectados.")
+        resultado: list[Candidato] = []
+        for indice, original in enumerate(originais):
+            _verificar_cancelamento(cancelado)
+            imagens = documento[indice].get_images(full=True)
+            if not imagens:
+                raise ErroExtracao(f"A página {indice + 1} do PDF extraído não contém um diagrama.")
+            maior = max(imagens, key=lambda item: int(item[2]) * int(item[3]))
+            dados = documento.extract_image(int(maior[0])).get("image")
+            if not isinstance(dados, bytes):
+                raise ErroExtracao(f"Não foi possível ler o diagrama {indice + 1} do PDF extraído.")
+            matriz = np.frombuffer(dados, dtype=np.uint8)
+            imagem = cv2.imdecode(matriz, cv2.IMREAD_COLOR)
+            if imagem is None:
+                raise ErroExtracao(f"Não foi possível decodificar o diagrama {indice + 1}.")
+            resultado.append(
+                Candidato(
+                    pagina=original.pagina,
+                    quadro=original.quadro.copy(),
+                    imagem=imagem,
+                    confianca=original.confianca,
+                )
+            )
+    return resultado
+
+
 def processar_pdf(
     caminho_entrada: os.PathLike[str] | str,
     caminho_saida: os.PathLike[str] | str,
     dpi: int = DPI_PADRAO,
     progresso: Callable[[int, int, int], None] | None = None,
+    cancelado: Callable[[], bool] | None = None,
 ) -> ResultadoExtracao:
-    total_paginas, candidatos = detectar_no_pdf(caminho_entrada, dpi=dpi, progresso=progresso)
+    total_paginas, candidatos = detectar_no_pdf(
+        caminho_entrada,
+        dpi=dpi,
+        progresso=progresso,
+        cancelado=cancelado,
+    )
     if not candidatos:
         return ResultadoExtracao(total_paginas, 0, None)
-    saida = criar_pdf_a4(candidatos, caminho_saida)
+    saida = criar_pdf_a4(candidatos, caminho_saida, cancelado=cancelado)
     return ResultadoExtracao(total_paginas, len(candidatos), saida)
 
 

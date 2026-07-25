@@ -130,6 +130,12 @@ O reconhecimento de posições usa o modelo do projeto
 [fenshot](https://github.com/scoriiu/fenshot), distribuído sob a licença MIT.
 Consulte os [avisos de terceiros](THIRD_PARTY_NOTICES.md).
 
+## Documentação técnica
+
+Para entender a arquitetura, os algoritmos de detecção e Forsyth, o processo de
+distribuição no Windows, os testes e os motivos das principais escolhas,
+consulte a [documentação técnica do projeto](docs/README.md).
+
 ---
 
 <p align="center">

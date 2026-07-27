@@ -40,6 +40,10 @@ organizar ou estudar.
 - Permite marcar um recorte como **Não é um tabuleiro/diagrama**, removendo-o do
   PDF revisado e da lista final de posições.
 - Salva automaticamente um rascunho da revisão para continuar depois.
+- Mantém uma biblioteca interna dos livros processados, independente da cópia
+  de PDF exportada, para reabrir e editar as posições posteriormente.
+- Permite definir o lado a jogar e o `Annotator` e exportar uma entrada PGN por
+  diagrama, com as tags `SetUp` e `FEN` completas.
 - Permite cancelar com segurança a detecção, o reconhecimento ou a geração do PDF.
 - Verifica novas versões e valida o SHA-256 antes de atualizar.
 - Inclui desinstalador e não exige Python ou bibliotecas adicionais.
@@ -75,6 +79,21 @@ somente para o usuário atual.
 10. Clique em **Salvar notações no PDF**. Toda sugestão com sintaxe válida aparecerá como
     texto selecionável acima do diagrama, e as posições também serão listadas ao final.
 11. Ao terminar, use **Abrir PDF** ou **Abrir pasta**.
+12. Para voltar a um livro, selecione-o na biblioteca abaixo de **Extrair
+    diagramas** e clique em **Visualizar selecionado**. No visualizador, escolha
+    **White to Move** ou **Black to Move**, revise as posições e use **Exportar
+    PGN** quando desejar. O nome do `Annotator` será solicitado durante a
+    exportação.
+
+Na biblioteca, use **Renomear** para alterar o nome interno e **Excluir** para
+remover apenas a cópia permanente do aplicativo. `F2`, `Delete` e `Enter`
+acionam, respectivamente, renomear, excluir e visualizar. Se uma extração ou
+renomeação repetir o nome de outro livro, o aplicativo solicita confirmação
+antes de substituir o conjunto de diagramas existente.
+
+O PDF escolhido durante a extração é uma cópia exportada. A biblioteca mantém
+uma cópia interna própria, portanto o livro continua disponível no aplicativo
+mesmo que o arquivo exportado seja movido ou excluído.
 
 Na notação portuguesa, `R/D/T/B/C/P` representam rei, dama, torre, bispo,
 cavalo e peão brancos. Na opção inglesa, são usadas as letras tradicionais

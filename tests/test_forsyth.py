@@ -131,6 +131,18 @@ class TesteNotacaoForsyth(unittest.TestCase):
         self.assertFalse(validar_posicao("9/8/8/8/8/8/8/8")[0])
         self.assertFalse(validar_posicao("4K3/8/8/8/8/8/8/4R3")[0])
 
+    def test_validacao_exige_exatamente_um_rei_de_cada_cor(self) -> None:
+        casos = (
+            ("8/8/8/8/8/8/8/4R3", "rei preto"),
+            ("4r3/8/8/8/8/8/8/8", "rei branco"),
+            ("4r3/8/8/8/8/8/4R3/4R3", "mais de um rei branco"),
+            ("4r3/4r3/8/8/8/8/8/4R3", "mais de um rei preto"),
+        )
+        for posicao, mensagem in casos:
+            valido, erro = validar_posicao(posicao)
+            self.assertFalse(valido)
+            self.assertIn(mensagem, erro)
+
     def test_rotacao_mantem_imagem_e_posicao_sincronizadas(self) -> None:
         original = "2r3t1/8/8/8/8/8/8/T3R3"
         girada = girar_posicao(original)
@@ -213,9 +225,9 @@ class TesteRascunhoForsyth(unittest.TestCase):
         self.assertEqual(janela.itens[1].posicao, "3r4/8/8/8/8/8/8/3R4")
         self.assertTrue(janela.itens[1].confirmada)
 
-    def test_visualizador_conclui_sem_exigir_confirmacao(self) -> None:
+    def test_visualizador_salva_sugestao_invalida_sem_bloquear(self) -> None:
         janela = JanelaRevisaoForsyth.__new__(JanelaRevisaoForsyth)
-        posicao = "4r3/8/8/8/8/8/8/4R3"
+        posicao = "8/8/8/8/8/8/8/8"
         janela.itens = [
             ItemRevisao(posicao=posicao),
             ItemRevisao(posicao="", nao_e_tabuleiro=True),
@@ -230,10 +242,10 @@ class TesteRascunhoForsyth(unittest.TestCase):
         recebidas = []
         janela.ao_finalizar = recebidas.append
 
-        with patch("revisor_forsyth.messagebox.askyesno") as confirmar:
+        with patch("revisor_forsyth.messagebox.showwarning") as aviso:
             janela._concluir()
 
-        confirmar.assert_not_called()
+        aviso.assert_not_called()
         self.assertEqual(recebidas[0][0].posicao, posicao)
         self.assertIsNone(recebidas[0][1].posicao)
         self.assertTrue(recebidas[0][1].excluir)
@@ -254,6 +266,19 @@ class TesteRascunhoForsyth(unittest.TestCase):
         self.assertTrue(janela.itens[0].nao_e_tabuleiro)
         janela.revisor_automatico.definir_exclusao.assert_called_once_with(0, True)
         janela.revisor_automatico.revisar_itens.assert_not_called()
+
+    def test_alternancia_do_lado_a_jogar_e_salva_no_item(self) -> None:
+        janela = JanelaRevisaoForsyth.__new__(JanelaRevisaoForsyth)
+        janela.indice = 0
+        janela.itens = [ItemRevisao()]
+        janela.variavel_lado = MagicMock()
+        janela.variavel_lado.get.return_value = "b"
+        janela._salvar_rascunho = MagicMock()
+
+        janela._alterar_lado()
+
+        self.assertEqual(janela.itens[0].lado_a_jogar, "b")
+        janela._salvar_rascunho.assert_called_once()
 
 
 class TesteRevisaoAutomaticaLivro(unittest.TestCase):
@@ -479,7 +504,9 @@ class TesteModeloForsyth(unittest.TestCase):
         reconhecedor = ReconhecedorForsyth(modelo)
         imagem = np.full((256, 256, 3), 255, dtype=np.uint8)
         resultado = reconhecedor.reconhecer(imagem)
-        self.assertTrue(validar_posicao(resultado.posicao)[0])
+        # Uma imagem vazia ainda deve produzir sintaxe 8x8 normalizável, mas
+        # não é uma posição válida porque não contém os dois reis.
+        self.assertEqual(normalizar_posicao(resultado.posicao), resultado.posicao)
         self.assertEqual(len(resultado.casas), 64)
         self.assertTrue(all(casa.probabilidades.shape == (13,) for casa in resultado.casas))
         self.assertTrue(all(len(casa.top3) == 3 for casa in resultado.casas))

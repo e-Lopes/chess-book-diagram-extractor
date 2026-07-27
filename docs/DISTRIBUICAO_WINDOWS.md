@@ -35,7 +35,7 @@ Em um Windows com Python 3.12 e Inno Setup 6:
 ```powershell
 python -m pip install -r requirements-build.txt
 python -m unittest discover -s tests -v
-.\build_windows.ps1 -Version 0.2.0
+.\build_windows.ps1 -Version 0.3.0
 ```
 
 O script prepara o ícone, gera metadados de versão, executa o PyInstaller e
@@ -90,7 +90,7 @@ Fluxo recomendado para publicar:
 1. atualizar `version.py` e os valores padrão de build quando necessário;
 2. executar os testes localmente;
 3. fazer commit e push em `main`;
-4. criar e enviar a tag, por exemplo `v0.2.1`;
+4. criar e enviar a tag correspondente, por exemplo `v0.3.0`;
 5. conferir o job e testar o instalador da Release em uma máquina limpa.
 
 Além do arquivo versionado, a automação cria
@@ -136,4 +136,3 @@ nas propriedades do arquivo e no pipeline correspondente.
 - O EXE foi executado em Windows 64 bits sem Python instalado.
 - Um PDF com zero, um e vários diagramas foi validado.
 - A Release contém o instalador versionado e o link permanente.
-

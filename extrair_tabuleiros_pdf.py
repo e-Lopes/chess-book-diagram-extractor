@@ -59,6 +59,7 @@ class AnotacaoSaida:
     girado: bool = False
     possivel_falso_positivo: bool = False
     excluir: bool = False
+    lado_a_jogar: str = "w"
 
 
 @dataclass(frozen=True)

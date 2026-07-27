@@ -331,6 +331,88 @@ class TesteIntegracao(unittest.TestCase):
         self.assertEqual(InterfaceExtrator._formatar_tempo(75), "1 min 15 s")
         self.assertEqual(InterfaceExtrator._formatar_tempo(3660), "1 h 01 min")
 
+    def test_ajuda_interna_carrega_a_secao_como_usar(self) -> None:
+        texto = InterfaceExtrator._carregar_texto_como_usar()
+        self.assertIn("Clique em Selecionar PDF", texto)
+        self.assertIn("Visualizar selecionado", texto)
+        self.assertNotIn("Atualizações automáticas", texto)
+
+    def test_busca_da_biblioteca_ignora_acentos_e_formata_data(self) -> None:
+        self.assertEqual(
+            InterfaceExtrator._chave_busca_biblioteca("  Posições Clássicas  "),
+            "posicoes classicas",
+        )
+        self.assertEqual(
+            InterfaceExtrator._formatar_data_criacao("2026-07-27T10:30:00+00:00"),
+            "27/07/2026",
+        )
+        self.assertEqual(InterfaceExtrator._formatar_data_criacao(""), "—")
+
+        livro = MagicMock(
+            titulo="Posições Clássicas",
+            diagramas=tuple(range(230)),
+            criado_em="2026-07-27T10:30:00+00:00",
+        )
+        self.assertTrue(InterfaceExtrator._livro_corresponde_ao_filtro(livro, "posicoes"))
+        self.assertTrue(InterfaceExtrator._livro_corresponde_ao_filtro(livro, "230"))
+        self.assertTrue(InterfaceExtrator._livro_corresponde_ao_filtro(livro, "27/07/2026"))
+        self.assertTrue(
+            InterfaceExtrator._livro_corresponde_ao_filtro(
+                livro, "2026 classicas 230"
+            )
+        )
+        self.assertFalse(InterfaceExtrator._livro_corresponde_ao_filtro(livro, "2025"))
+
+    def test_editor_forsyth_separa_e_reune_as_oito_linhas(self) -> None:
+        posicao = "2k2b1r/1pq3p1/2p1pp2/p1n1PnNp/2P2B2/2N4P/PP2QPP1/3R2K1"
+        linhas = InterfaceExtrator._separar_linhas_forsyth(posicao)
+
+        self.assertEqual(len(linhas), 8)
+        self.assertEqual(linhas[0], "2k2b1r")
+        self.assertEqual(linhas[-1], "3R2K1")
+        self.assertEqual(InterfaceExtrator._juntar_linhas_forsyth(linhas), posicao)
+        self.assertEqual(
+            InterfaceExtrator._juntar_linhas_forsyth(["8/", "8", "8", "8", "8", "8", "8", "8"]),
+            "8/8/8/8/8/8/8/8",
+        )
+
+    def test_correcao_valida_e_persistida_com_outro_diagrama_pendente(self) -> None:
+        interface = InterfaceExtrator.__new__(InterfaceExtrator)
+        posicao_corrigida = "4r3/8/8/8/8/8/8/4R3"
+        interface.itens_biblioteca = [
+            MagicMock(posicao=posicao_corrigida, lado_a_jogar="w"),
+            MagicMock(posicao="8/8/8/8/8/8/8/8", lado_a_jogar="w"),
+        ]
+        interface.candidatos_biblioteca = [
+            MagicMock(pagina=1, confianca=0.9),
+            MagicMock(pagina=2, confianca=0.8),
+        ]
+        interface.indice_biblioteca = 0
+        interface.livro_em_edicao = MagicMock(
+            idioma="pt",
+            id="livro",
+            pdf_interno=Path("diagramas.pdf"),
+            titulo="Livro",
+            paginas_originais=2,
+        )
+        interface.annotator_biblioteca = MagicMock()
+        interface.annotator_biblioteca.get.return_value = ""
+        interface.biblioteca = MagicMock()
+        interface.biblioteca.salvar.return_value = interface.livro_em_edicao
+        interface._salvar_diagrama_atual_biblioteca = MagicMock(return_value=True)
+
+        interface._persistir_editor_biblioteca(exigir_todas_validas=False)
+
+        diagramas = interface.biblioteca.salvar.call_args.args[2]
+        self.assertEqual(diagramas[0].posicao, posicao_corrigida)
+        self.assertEqual(diagramas[1].posicao, "8/8/8/8/8/8/8/8")
+        self.assertEqual(
+            InterfaceExtrator._indices_invalidos_biblioteca(
+                interface.itens_biblioteca, "pt"
+            ),
+            [1],
+        )
+
     def test_pdf_sintetico_gera_um_diagrama_por_pagina_a4(self) -> None:
         with tempfile.TemporaryDirectory() as pasta:
             entrada = Path(pasta) / "livro.pdf"

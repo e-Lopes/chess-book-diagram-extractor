@@ -54,6 +54,16 @@ Valida notação, modelo, persistência, revisão automática e PDF anotado:
 - correspondência entre anotação, diagrama e índice final;
 - exclusão de itens marcados como não tabuleiro.
 
+### `tests/test_biblioteca.py`
+
+Valida a biblioteca interna e a exportação dos livros processados:
+
+- persistência e reabertura de livros;
+- renomeação, substituição e exclusão;
+- edição das FENs e do lado a jogar;
+- persistência do `Annotator`;
+- exportação PGN com as tags `SetUp` e `FEN` completas.
+
 Algumas funções legadas de transformação continuam testadas mesmo sem controle
 correspondente na interface. Isso preserva compatibilidade dos dados antigos e
 evita que uma futura migração interprete um rascunho de forma incorreta.
@@ -113,4 +123,3 @@ python -m compileall -q .
 
 Pastas de livros locais, PDFs produzidos, `build/`, `dist/` e `release/` não
 devem ser versionados. O `.gitignore` mantém esses artefatos fora do histórico.
-

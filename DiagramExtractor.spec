@@ -16,6 +16,7 @@ dados = dados_cv2 + dados_ttk + [
     (str(raiz / "models" / "chess-tiles-v2.onnx"), "models"),
     (str(raiz / "licenses" / "fenshot-LICENSE.txt"), "licenses"),
     (str(raiz / "THIRD_PARTY_NOTICES.md"), "."),
+    (str(raiz / "README.md"), "."),
 ]
 binarios = binarios_cv2 + binarios_ttk
 imports = imports_cv2 + imports_ttk + ["onnxruntime"]

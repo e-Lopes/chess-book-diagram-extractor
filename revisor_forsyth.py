@@ -6,13 +6,14 @@ import logging
 import tkinter as tk
 from pathlib import Path
 from typing import Callable, Sequence
-from tkinter import messagebox
+from tkinter import filedialog, messagebox, simpledialog
 
 import cv2
 import ttkbootstrap as ttk
 from PIL import Image, ImageTk
 
 from extrair_tabuleiros_pdf import AnotacaoSaida, Candidato
+from biblioteca_livros import DiagramaSalvo, exportar_pgn
 from notacao_forsyth import (
     ItemRevisao,
     RevisorAutomaticoLivro,
@@ -44,6 +45,10 @@ class JanelaRevisaoForsyth:
         ao_finalizar: Callable[[list[AnotacaoSaida]], None],
         ao_cancelar: Callable[[], None],
         logger: logging.Logger,
+        annotator: str = "",
+        titulo_livro: str = "Livro de xadrez",
+        ao_salvar_annotator: Callable[[str], None] | None = None,
+        modo_biblioteca: bool = False,
     ) -> None:
         if not candidatos or len(candidatos) != len(itens):
             raise ValueError("A revisão exige um estado para cada diagrama.")
@@ -57,6 +62,10 @@ class JanelaRevisaoForsyth:
         self.ao_finalizar = ao_finalizar
         self.ao_cancelar = ao_cancelar
         self.logger = logger
+        self.annotator = annotator
+        self.titulo_livro = titulo_livro
+        self.ao_salvar_annotator = ao_salvar_annotator
+        self.modo_biblioteca = modo_biblioteca
         self.indice = 0
         self._fechando = False
         self._imagem_tk: ImageTk.PhotoImage | None = None
@@ -64,6 +73,8 @@ class JanelaRevisaoForsyth:
 
         self.janela = ttk.Toplevel(master=raiz)
         self.variavel_excluir = tk.BooleanVar(master=self.janela, value=False)
+        self.variavel_lado = tk.StringVar(master=self.janela, value="w")
+        self.variavel_annotator = tk.StringVar(master=self.janela, value=annotator)
         self.janela.title("Visualizar notações Forsyth")
         largura_inicial = min(LARGURA_REVISOR, max(900, self.janela.winfo_screenwidth() - 80))
         altura_inicial = min(ALTURA_REVISOR, max(620, self.janela.winfo_screenheight() - 100))
@@ -107,7 +118,7 @@ class JanelaRevisaoForsyth:
         ttk.Label(cabecalho, text="Visualizar notações", style="HeaderTitle.TLabel").grid(
             row=0, column=0, sticky="w"
         )
-        self.rotulo_contador = ttk.Label(cabecalho, bootstyle="secondary", font=("Segoe UI", 10, "bold"))
+        self.rotulo_contador = ttk.Label(cabecalho, bootstyle="secondary", font=("Segoe UI", 11, "bold"))
         self.rotulo_contador.grid(row=0, column=1, sticky="e")
 
         self.quadro_imagem = ttk.Frame(principal, padding=12, bootstyle="@card")
@@ -121,18 +132,21 @@ class JanelaRevisaoForsyth:
         painel = ttk.Frame(principal, padding=18, bootstyle="@card")
         painel.grid(row=1, column=1, sticky="nsew")
         painel.columnconfigure(0, weight=1)
-        painel.rowconfigure(6, weight=1)
+        painel.rowconfigure(10, weight=1)
 
         self.rotulo_origem = ttk.Label(painel, style="FieldLabel.TLabel")
         self.rotulo_origem.grid(row=0, column=0, sticky="w")
         ttk.Label(
             painel,
-            text="Navegue pelas sugestões e edite uma posição somente se desejar.",
+            text=(
+                "Confira as sugestões e marque somente os recortes que não são "
+                "tabuleiros. A revisão das posições será feita depois."
+            ),
             bootstyle="secondary",
             wraplength=360,
         ).grid(row=1, column=0, sticky="w", pady=(3, 18))
 
-        ttk.Label(painel, text="Posição das peças", style="FieldLabel.TLabel").grid(
+        ttk.Label(painel, text="Sugestão Forsyth", style="FieldLabel.TLabel").grid(
             row=2, column=0, sticky="w"
         )
         self.campo_posicao = tk.Text(
@@ -140,7 +154,7 @@ class JanelaRevisaoForsyth:
             width=46,
             height=4,
             wrap="char",
-            font=("Consolas", 11),
+            font=("Consolas", 12),
             relief="solid",
             borderwidth=1,
             padx=9,
@@ -153,6 +167,38 @@ class JanelaRevisaoForsyth:
         self.rotulo_validacao = ttk.Label(painel, wraplength=360, justify="left")
         self.rotulo_validacao.grid(row=4, column=0, sticky="ew")
 
+        self.rotulo_lado = ttk.Label(painel, text="Lado a jogar", style="FieldLabel.TLabel")
+        self.rotulo_lado.grid(
+            row=5, column=0, sticky="w", pady=(14, 4)
+        )
+        self.quadro_lados = ttk.Frame(painel)
+        self.quadro_lados.grid(row=6, column=0, sticky="w")
+        ttk.Radiobutton(
+            self.quadro_lados,
+            text="White to Move",
+            variable=self.variavel_lado,
+            value="w",
+            command=self._alterar_lado,
+            bootstyle="primary",
+        ).pack(side="left")
+        ttk.Radiobutton(
+            self.quadro_lados,
+            text="Black to Move",
+            variable=self.variavel_lado,
+            value="b",
+            command=self._alterar_lado,
+            bootstyle="primary",
+        ).pack(side="left", padx=(14, 0))
+
+        self.rotulo_annotator = ttk.Label(
+            painel, text="Annotator", style="FieldLabel.TLabel"
+        )
+        self.rotulo_annotator.grid(
+            row=7, column=0, sticky="w", pady=(14, 4)
+        )
+        self.campo_annotator = ttk.Entry(painel, textvariable=self.variavel_annotator)
+        self.campo_annotator.grid(row=8, column=0, sticky="ew")
+
         self.checkbox_excluir = ttk.Checkbutton(
             painel,
             text="Não é um tabuleiro/diagrama — excluir do PDF final",
@@ -160,9 +206,9 @@ class JanelaRevisaoForsyth:
             command=self._alterar_exclusao,
             bootstyle="danger",
         )
-        self.checkbox_excluir.grid(row=5, column=0, sticky="w", pady=(14, 12))
+        self.checkbox_excluir.grid(row=9, column=0, sticky="w", pady=(14, 12))
 
-        ttk.Label(
+        self.rotulo_ajuda = ttk.Label(
             painel,
             text=(
                 (
@@ -176,7 +222,8 @@ class JanelaRevisaoForsyth:
             wraplength=360,
             justify="left",
             bootstyle="secondary",
-        ).grid(row=6, column=0, sticky="sw", pady=(18, 0))
+        )
+        self.rotulo_ajuda.grid(row=10, column=0, sticky="sw", pady=(18, 0))
 
         navegacao = ttk.Frame(principal)
         navegacao.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(16, 0))
@@ -218,6 +265,23 @@ class JanelaRevisaoForsyth:
             bootstyle="primary",
         )
         self.botao_finalizar.grid(row=0, column=1, sticky="e", padx=(18, 0))
+        self.botao_exportar_pgn = ttk.Button(
+            navegacao,
+            text="Exportar PGN",
+            command=self._exportar_pgn,
+            bootstyle="success outline",
+        )
+        self.botao_exportar_pgn.grid(row=0, column=2, sticky="e", padx=(8, 0))
+        if not self.modo_biblioteca:
+            self.rotulo_lado.grid_remove()
+            self.quadro_lados.grid_remove()
+            self.rotulo_annotator.grid_remove()
+            self.campo_annotator.grid_remove()
+            self.botao_exportar_pgn.grid_remove()
+            self.checkbox_excluir.grid_configure(row=5)
+            self.rotulo_ajuda.grid_configure(row=6)
+            painel.rowconfigure(10, weight=0)
+            painel.rowconfigure(6, weight=1)
 
     def _restaurar_rascunho(self) -> None:
         dados = carregar_rascunho(
@@ -266,6 +330,10 @@ class JanelaRevisaoForsyth:
         variavel_excluir = getattr(self, "variavel_excluir", None)
         if variavel_excluir is not None:
             item.nao_e_tabuleiro = bool(variavel_excluir.get())
+        variavel_lado = getattr(self, "variavel_lado", None)
+        if variavel_lado is not None:
+            lado = variavel_lado.get()
+            item.lado_a_jogar = lado if lado in ("w", "b") else "w"
         if (
             valido
             and texto != texto_anterior
@@ -293,6 +361,11 @@ class JanelaRevisaoForsyth:
         self._salvar_rascunho()
         self._validar_digitacao()
 
+    def _alterar_lado(self) -> None:
+        lado = self.variavel_lado.get()
+        self.itens[self.indice].lado_a_jogar = lado if lado in ("w", "b") else "w"
+        self._salvar_rascunho()
+
     def _navegar(self, deslocamento: int) -> None:
         self._ir_para(min(len(self.itens) - 1, max(0, self.indice + deslocamento)))
 
@@ -308,6 +381,15 @@ class JanelaRevisaoForsyth:
             self.rotulo_validacao.configure(
                 text="Este recorte será excluído do PDF final e da lista de notações.",
                 bootstyle="danger",
+            )
+            return
+        if not getattr(self, "modo_biblioteca", False):
+            self.rotulo_validacao.configure(
+                text=(
+                    "Sugestão automática. A posição poderá ser revisada depois, "
+                    "diagrama por diagrama."
+                ),
+                bootstyle="secondary",
             )
             return
         texto = self._texto_campo()
@@ -358,14 +440,20 @@ class JanelaRevisaoForsyth:
         self.rotulo_origem.configure(text=f"Página original: {candidato.pagina}")
         self._definir_campo(item.posicao)
         self.variavel_excluir.set(item.nao_e_tabuleiro)
+        self.variavel_lado.set(item.lado_a_jogar if item.lado_a_jogar in ("w", "b") else "w")
         self._atualizar_imagem()
-        valido = validar_posicao(item.posicao, self.idioma)[0]
         if item.nao_e_tabuleiro:
             estado = "Este recorte será excluído do PDF final e da lista de notações."
             estilo = "danger"
-        elif not valido:
-            estado = "Posição vazia ou com sintaxe inválida."
-            estilo = "danger"
+        elif not getattr(self, "modo_biblioteca", False):
+            estado = (
+                "Sugestão automática. Nesta etapa, marque apenas os recortes que "
+                "não são tabuleiros."
+            )
+            estilo = "secondary"
+        elif not validar_posicao(item.posicao, self.idioma)[0]:
+            estado = item.aviso or "Posição vazia ou com sintaxe inválida."
+            estilo = "warning" if item.aviso else "danger"
         else:
             aviso = aviso_plausibilidade(item.posicao, self.idioma)
             estado = aviso
@@ -381,25 +469,118 @@ class JanelaRevisaoForsyth:
 
     def _concluir(self) -> None:
         self._salvar_atual(confirmar=True)
+        if getattr(self, "modo_biblioteca", False):
+            for indice, item in enumerate(self.itens):
+                if item.nao_e_tabuleiro:
+                    continue
+                valido, mensagem = validar_posicao(item.posicao, self.idioma)
+                if not valido:
+                    self.indice = indice
+                    self._exibir_atual()
+                    messagebox.showwarning(
+                        "Posição inválida",
+                        f"Revise o diagrama {indice + 1}: {mensagem}",
+                        parent=self.janela,
+                    )
+                    return
         anotacoes: list[AnotacaoSaida] = []
         for item in self.itens:
             valido = validar_posicao(item.posicao, self.idioma)[0]
-            posicao = normalizar_posicao(item.posicao, self.idioma) if valido else None
+            posicao_bruta = item.posicao.strip() or None
+            posicao = (
+                normalizar_posicao(item.posicao, self.idioma)
+                if valido
+                else posicao_bruta
+            )
             anotacoes.append(
                 AnotacaoSaida(
                     posicao=posicao,
                     girado=False,
                     possivel_falso_positivo=bool(
-                        posicao and aviso_plausibilidade(posicao, self.idioma)
+                        item.aviso
+                        or (valido and posicao and aviso_plausibilidade(posicao, self.idioma))
                     ),
                     excluir=item.nao_e_tabuleiro,
+                    lado_a_jogar=item.lado_a_jogar,
                 )
             )
+        variavel_annotator = getattr(self, "variavel_annotator", None)
+        annotator = variavel_annotator.get().strip() if variavel_annotator is not None else ""
+        ao_salvar_annotator = getattr(self, "ao_salvar_annotator", None)
+        if ao_salvar_annotator is not None:
+            ao_salvar_annotator(annotator)
         self._fechando = True
         self._cancelar_redimensionamento()
         self.janela.grab_release()
         self.janela.destroy()
         self.ao_finalizar(anotacoes)
+
+    def _diagramas_para_pgn(self) -> list[DiagramaSalvo]:
+        diagramas: list[DiagramaSalvo] = []
+        for candidato, item in zip(self.candidatos, self.itens):
+            if item.nao_e_tabuleiro:
+                continue
+            valido = validar_posicao(item.posicao, self.idioma)[0]
+            if not valido:
+                continue
+            diagramas.append(
+                DiagramaSalvo(
+                    pagina=candidato.pagina,
+                    confianca=candidato.confianca,
+                    posicao=normalizar_posicao(item.posicao, self.idioma),
+                    lado_a_jogar=item.lado_a_jogar,
+                )
+            )
+        return diagramas
+
+    def _exportar_pgn(self) -> None:
+        self._salvar_atual(confirmar=True)
+        diagramas = self._diagramas_para_pgn()
+        if not diagramas:
+            messagebox.showwarning(
+                "Nenhuma posicao valida",
+                "Informe ao menos uma posicao valida antes de exportar.",
+                parent=self.janela,
+            )
+            return
+        annotator = simpledialog.askstring(
+            "Exportar PGN",
+            "Nome do Annotator:",
+            initialvalue=self.variavel_annotator.get().strip(),
+            parent=self.janela,
+        )
+        if annotator is None:
+            return
+        annotator = annotator.strip()
+        self.variavel_annotator.set(annotator)
+        destino = filedialog.asksaveasfilename(
+            title="Salvar arquivo PGN",
+            initialfile=(
+                "".join(
+                    "_" if caractere in '<>:"/\\|?*' else caractere
+                    for caractere in self.titulo_livro
+                ).strip(" .")
+                or "posicoes"
+            )
+            + ".pgn",
+            defaultextension=".pgn",
+            filetypes=[("Arquivos PGN", "*.pgn")],
+            parent=self.janela,
+        )
+        if not destino:
+            return
+        try:
+            exportar_pgn(destino, self.titulo_livro, diagramas, annotator, self.idioma)
+            if self.ao_salvar_annotator is not None:
+                self.ao_salvar_annotator(annotator)
+            messagebox.showinfo(
+                "PGN exportado",
+                f"{len(diagramas)} posicao(oes) exportada(s) com sucesso.",
+                parent=self.janela,
+            )
+        except (OSError, ValueError) as erro:
+            self.logger.exception("Falha ao exportar o PGN.")
+            messagebox.showerror("Nao foi possivel exportar o PGN", str(erro), parent=self.janela)
 
     def _fechar(self) -> None:
         if self._fechando:
@@ -411,6 +592,12 @@ class JanelaRevisaoForsyth:
         ):
             return
         self._salvar_atual(confirmar=False)
+        ao_salvar_annotator = getattr(self, "ao_salvar_annotator", None)
+        if ao_salvar_annotator is not None:
+            variavel_annotator = getattr(self, "variavel_annotator", None)
+            ao_salvar_annotator(
+                variavel_annotator.get().strip() if variavel_annotator is not None else ""
+            )
         self._fechando = True
         self._cancelar_redimensionamento()
         self.janela.grab_release()

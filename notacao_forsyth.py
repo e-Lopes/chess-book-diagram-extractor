@@ -105,9 +105,20 @@ def validar_posicao(posicao: str, idioma: str = "pt") -> tuple[bool, str]:
     if not posicao.strip():
         return False, "Informe a posição das peças."
     try:
-        normalizar_posicao(posicao, idioma)
+        normalizada = normalizar_posicao(posicao, idioma)
     except ValueError as erro:
         return False, str(erro)
+    rei_branco, rei_preto = ("R", "r") if idioma == "pt" else ("K", "k")
+    quantidade_brancos = normalizada.count(rei_branco)
+    quantidade_pretos = normalizada.count(rei_preto)
+    if quantidade_brancos == 0:
+        return False, "A posição precisa conter um rei branco."
+    if quantidade_brancos > 1:
+        return False, "A posição não pode conter mais de um rei branco."
+    if quantidade_pretos == 0:
+        return False, "A posição precisa conter um rei preto."
+    if quantidade_pretos > 1:
+        return False, "A posição não pode conter mais de um rei preto."
     return True, "Posição válida."
 
 
@@ -855,6 +866,7 @@ class ItemRevisao:
     duvidas_automaticas: tuple[DuvidaAutomatica, ...] = ()
     editada_manualmente: bool = False
     casas: tuple[DadosCasa, ...] = ()
+    lado_a_jogar: str = "w"
 
     @classmethod
     def de_reconhecimento(cls, resultado: ResultadoReconhecimento) -> "ItemRevisao":
@@ -967,7 +979,7 @@ def salvar_rascunho(
     destino = caminho_rascunho(caminho_pdf, pasta)
     destino.parent.mkdir(parents=True, exist_ok=True)
     conteudo = {
-        "schema": 2,
+        "schema": 3,
         "origem": _impressao_digital_pdf(caminho_pdf),
         "quantidade": len(itens),
         "idioma": idioma,
@@ -979,6 +991,7 @@ def salvar_rascunho(
                 "nao_e_tabuleiro": item.nao_e_tabuleiro,
                 "posicao_original": item.posicao_original,
                 "editada_manualmente": item.editada_manualmente,
+                "lado_a_jogar": item.lado_a_jogar,
                 "alteracoes_automaticas": [
                     {
                         "indice": alteracao.indice,
@@ -1023,7 +1036,7 @@ def carregar_rascunho(
     except (OSError, ValueError, TypeError):
         return None
     if (
-        dados.get("schema") not in (1, 2)
+        dados.get("schema") not in (1, 2, 3)
         or dados.get("origem") != _impressao_digital_pdf(caminho_pdf)
         or dados.get("idioma", "pt") != idioma
     ):
@@ -1047,6 +1060,8 @@ def aplicar_rascunho(itens: Sequence[ItemRevisao], dados: Sequence[dict[str, obj
         item.girado = bool(salvo.get("girado", item.girado))
         item.nao_e_tabuleiro = bool(salvo.get("nao_e_tabuleiro", False))
         item.editada_manualmente = bool(salvo.get("editada_manualmente", False))
+        lado_a_jogar = salvo.get("lado_a_jogar", "w")
+        item.lado_a_jogar = lado_a_jogar if lado_a_jogar in ("w", "b") else "w"
         posicao_original = salvo.get("posicao_original")
         if isinstance(posicao_original, str):
             item.posicao_original = posicao_original

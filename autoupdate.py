@@ -8,6 +8,7 @@ import re
 import subprocess
 import tempfile
 import urllib.request
+import urllib.error
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -18,6 +19,10 @@ TAMANHO_MAXIMO = 350 * 1024 * 1024
 
 
 class ErroAtualizacao(RuntimeError):
+    pass
+
+
+class AtualizacaoCancelada(ErroAtualizacao):
     pass
 
 
@@ -39,6 +44,17 @@ def chave_versao(valor: str) -> tuple[int, int, int]:
     return tuple(int(parte) for parte in correspondencia.groups())  # type: ignore[return-value]
 
 
+def versao_mais_nova(nova: str, atual: str) -> bool:
+    """Compara também pré-releases; metadados +build não mudam a ordem."""
+    def chave(valor):
+        numeros = chave_versao(valor)
+        principal = valor.strip().removeprefix("v").split("+", 1)[0]
+        partes = principal.split("-", 1)
+        previa = tuple((0, int(p)) if p.isdigit() else (1, p) for p in partes[1].split(".")) if len(partes) == 2 else ()
+        return numeros, len(partes) == 1, previa
+    return chave(nova) > chave(atual)
+
+
 def consultar_atualizacao(
     repositorio: str,
     versao_atual: str,
@@ -57,12 +73,22 @@ def consultar_atualizacao(
     try:
         with abrir_url(requisicao, timeout=10) as resposta:  # type: ignore[attr-defined]
             dados = json.loads(resposta.read().decode("utf-8"))
+    except urllib.error.HTTPError as erro:
+        if erro.code == 404:
+            return None
+        if erro.code in (403, 429):
+            raise ErroAtualizacao("O GitHub limitou as consultas. Tente novamente mais tarde.") from erro
+        raise ErroAtualizacao(f"Não foi possível consultar o GitHub (HTTP {erro.code}).") from erro
     except Exception as erro:
         raise ErroAtualizacao(f"Não foi possível consultar o GitHub: {erro}") from erro
 
+    if not isinstance(dados, dict):
+        raise ErroAtualizacao("Resposta de atualização inválida.")
+    if dados.get("draft") or dados.get("prerelease"):
+        return None
     versao = str(dados.get("tag_name", "")).removeprefix("v")
     try:
-        if chave_versao(versao) <= chave_versao(versao_atual):
+        if not versao_mais_nova(versao, versao_atual):
             return None
     except ValueError as erro:
         raise ErroAtualizacao(str(erro)) from erro
@@ -75,12 +101,15 @@ def consultar_atualizacao(
     digest = str(ativo.get("digest") or "")
     if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest):
         raise ErroAtualizacao("O instalador publicado não possui um SHA-256 válido.")
-    tamanho = int(ativo.get("size") or 0)
+    try:
+        tamanho = int(ativo.get("size") or 0)
+    except (TypeError, ValueError) as erro:
+        raise ErroAtualizacao("O tamanho do instalador publicado é inválido.") from erro
     if tamanho <= 0 or tamanho > TAMANHO_MAXIMO:
         raise ErroAtualizacao("O tamanho do instalador publicado é inválido.")
     url = str(ativo.get("browser_download_url") or "")
-    prefixo_seguro = f"https://github.com/{repositorio}/releases/download/"
-    if not url.startswith(prefixo_seguro):
+    url_esperada = f"https://github.com/{repositorio}/releases/download/{dados['tag_name']}/{nome_esperado}"
+    if url != url_esperada:
         raise ErroAtualizacao("A URL do instalador não pertence à Release esperada.")
 
     return Atualizacao(
@@ -97,11 +126,25 @@ def baixar_atualizacao(
     atualizacao: Atualizacao,
     progresso: Callable[[int, int], None] | None = None,
     abrir_url: Callable[..., object] = urllib.request.urlopen,
+    cancelado: Callable[[], bool] | None = None,
 ) -> Path:
+    if (Path(atualizacao.nome_arquivo).name != atualizacao.nome_arquivo
+            or not re.fullmatch(r"ChessBookDiagramExtractor-Setup-v[0-9A-Za-z.+-]+\.exe", atualizacao.nome_arquivo)):
+        raise ErroAtualizacao("Nome do instalador inválido.")
+    if not 0 < atualizacao.tamanho <= TAMANHO_MAXIMO:
+        raise ErroAtualizacao("Tamanho do instalador inválido.")
+    def verificar_cancelamento():
+        if cancelado and cancelado():
+            raise AtualizacaoCancelada("Download cancelado.")
+    verificar_cancelamento()
     pasta = Path(tempfile.gettempdir()) / "ChessBookDiagramExtractor" / "updates"
     pasta.mkdir(parents=True, exist_ok=True)
     destino = pasta / atualizacao.nome_arquivo
-    parcial = destino.with_suffix(".partial")
+    # Arquivo único evita colisões entre duas instâncias ou downloads abortados.
+    descritor, temporario = tempfile.mkstemp(prefix="download-", suffix=".partial", dir=pasta)
+    import os
+    os.close(descritor)
+    parcial = Path(temporario)
     requisicao = urllib.request.Request(
         atualizacao.url,
         headers={"User-Agent": "ChessBookDiagramExtractor-Updater"},
@@ -111,13 +154,15 @@ def baixar_atualizacao(
     try:
         with abrir_url(requisicao, timeout=30) as resposta, parcial.open("wb") as arquivo:  # type: ignore[attr-defined]
             while bloco := resposta.read(1024 * 1024):
+                verificar_cancelamento()
                 recebido += len(bloco)
-                if recebido > TAMANHO_MAXIMO:
+                if recebido > atualizacao.tamanho:
                     raise ErroAtualizacao("O download excedeu o tamanho máximo permitido.")
                 arquivo.write(bloco)
                 hash_arquivo.update(bloco)
                 if progresso:
                     progresso(recebido, atualizacao.tamanho)
+        verificar_cancelamento()
         if recebido != atualizacao.tamanho:
             raise ErroAtualizacao("O download terminou com tamanho diferente do publicado.")
         if hash_arquivo.hexdigest().lower() != atualizacao.sha256:
@@ -135,6 +180,13 @@ def iniciar_instalador(caminho: Path) -> None:
     if not caminho.is_file():
         raise ErroAtualizacao("O instalador baixado não foi encontrado.")
     subprocess.Popen(
-        [str(caminho), "/SILENT", "/CLOSEAPPLICATIONS", "/NORESTART"],
+        [
+            str(caminho),
+            "/SILENT",
+            "/CLOSEAPPLICATIONS",
+            "/NORESTART",
+            "/NORESTARTAPPLICATIONS",
+            "/REOPENAPP=1",
+        ],
         close_fds=True,
     )

@@ -11,15 +11,24 @@ gerados = raiz / "build" / "generated"
 dados_cv2, binarios_cv2, imports_cv2 = collect_all("cv2")
 dados_ttk, binarios_ttk, imports_ttk = collect_all("ttkbootstrap")
 dados = dados_cv2 + dados_ttk + [
+    (str(raiz / "assets" / "selftest-board.png"), "assets"),
+    (str(raiz / "assets" / "SELFTEST.md"), "assets"),
+    (str(raiz / "assets" / "pieces" / "cburnett"), "assets/pieces/cburnett"),
+    (str(raiz / "licenses" / "cburnett-BSD-3-Clause.txt"), "licenses"),
     (str(raiz / "icon" / "chess-book-diagram-extractor.png"), "icon"),
     (str(raiz / "icon" / "chess-book-diagram-extractor.ico"), "icon"),
     (str(raiz / "models" / "chess-tiles-v2.onnx"), "models"),
+    (str(raiz / "models" / "linrock-tiles.onnx"), "models"),
+    (str(raiz / "models" / "chessbot-tiles.onnx"), "models"),
+    (str(raiz / "models" / "ensemble.json"), "models"),
     (str(raiz / "licenses" / "fenshot-LICENSE.txt"), "licenses"),
+    (str(raiz / "licenses" / "linrock-LICENSE.txt"), "licenses"),
+    (str(raiz / "licenses" / "legacy-LICENSE.txt"), "licenses"),
     (str(raiz / "THIRD_PARTY_NOTICES.md"), "."),
     (str(raiz / "README.md"), "."),
 ]
 binarios = binarios_cv2 + binarios_ttk
-imports = imports_cv2 + imports_ttk + ["onnxruntime"]
+imports = imports_cv2 + imports_ttk + ["onnxruntime", "verificacao_distribuicao"]
 
 a = Analysis(
     [str(raiz / "interface_windows.py")],

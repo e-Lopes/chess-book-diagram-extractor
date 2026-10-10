@@ -6,7 +6,9 @@ on:
       version:
         description: "Versão do build manual"
         required: true
-        default: "0.3.0"
+        default: "0.4.1"
+  pull_request:
+    branches: ["main"]
   push:
     branches:
       - "main"
@@ -14,7 +16,7 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   windows:
@@ -40,14 +42,18 @@ jobs:
       - name: Definir versão
         id: version
         shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if ("${{ github.ref_type }}" -eq "tag") {
-            $BuildVersion = "${{ github.ref_name }}".TrimStart("v")
-          } elseif ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $BuildVersion = "${{ inputs.version }}"
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $BuildVersion = $env:GITHUB_REF_NAME.TrimStart("v")
+          } elseif ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            $BuildVersion = $env:INPUT_VERSION
           } else {
             $BuildVersion = (& python -c "from version import __version__; print(__version__)").Trim()
           }
+          python packaging/generate_build_metadata.py --version $BuildVersion --repository $env:GITHUB_REPOSITORY --publisher 'E-Lopes'
+          if ($LASTEXITCODE -ne 0) { throw 'Versão ou repositório inválido.' }
           "value=$BuildVersion" >> $env:GITHUB_OUTPUT
 
       - name: Gerar aplicativo
@@ -55,6 +61,15 @@ jobs:
           python packaging/prepare_icon.py
           python packaging/generate_build_metadata.py --version "${{ steps.version.outputs.value }}" --repository "${{ github.repository }}" --publisher "E-Lopes"
           python -m PyInstaller --clean --noconfirm DiagramExtractor.spec
+
+      - name: Verificar aplicativo empacotado
+        shell: pwsh
+        run: |
+          $ReportPath = Join-Path (Get-Location) 'build\selftest-packaged.json'
+          $App = Start-Process -FilePath 'dist\ChessBookDiagramExtractor\ChessBookDiagramExtractor.exe' -ArgumentList @('--self-test', '--report', ('"' + $ReportPath + '"')) -WindowStyle Hidden -Wait -PassThru
+          if ($App.ExitCode -ne 0) { throw 'Diagnóstico do aplicativo falhou.' }
+          $Report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
+          if (-not $Report.ok -or -not $Report.empacotado -or $Report.versao -ne '${{ steps.version.outputs.value }}' -or $Report.repositorio -ne $env:GITHUB_REPOSITORY) { throw 'Metadados do aplicativo incoerentes.' }
 
       - name: Instalar Inno Setup
         run: choco install innosetup --no-progress -y
@@ -67,6 +82,13 @@ jobs:
         shell: pwsh
         run: Copy-Item "release\ChessBookDiagramExtractor-Setup-v${{ steps.version.outputs.value }}.exe" "release\ChessBookDiagramExtractor-Setup.exe"
 
+      - name: Verificar instalação, reinstalação e desinstalação
+        shell: pwsh
+        run: .\packaging\smoke_install.ps1 -Installer 'release\ChessBookDiagramExtractor-Setup-v${{ steps.version.outputs.value }}.exe' -Version '${{ steps.version.outputs.value }}'
+
+      - name: Gerar inventário de arquivos e SHA-256
+        run: python packaging/prepare_release.py --version "${{ steps.version.outputs.value }}"
+
       - name: Guardar instalador como artefato
         uses: actions/upload-artifact@v4
         with:
@@ -74,15 +96,35 @@ jobs:
           path: |
             release/ChessBookDiagramExtractor-Setup-v${{ steps.version.outputs.value }}.exe
             release/ChessBookDiagramExtractor-Setup.exe
+            release/SHA256SUMS.txt
+            release/release.json
+            build/selftest-packaged.json
+            build/installer-smoke/*.json
+            build/installer-smoke/*.log
           if-no-files-found: error
 
+  publish:
+    if: github.ref_type == 'tag' && github.event_name == 'push'
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Baixar artefatos verificados
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
       - name: Publicar GitHub Release
-        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            release/ChessBookDiagramExtractor-Setup-v${{ steps.version.outputs.value }}.exe
-            release/ChessBookDiagramExtractor-Setup.exe
+            artifacts/release/ChessBookDiagramExtractor-Setup-v*.exe
+            artifacts/release/ChessBookDiagramExtractor-Setup.exe
+            artifacts/release/SHA256SUMS.txt
+            artifacts/release/release.json
+          fail_on_unmatched_files: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
           body: |
             ## Code signing policy

@@ -3,7 +3,7 @@
 ## Resultado para o usuário
 
 O instalador contém o interpretador Python, bibliotecas nativas, interface,
-modelo ONNX, ícones e licenças. Por isso o computador de destino não precisa ter
+três modelos ONNX, peças SVG, ícones e licenças. Por isso o computador de destino não precisa ter
 Python, OpenCV, PyMuPDF ou ONNX Runtime instalados. A versão atual é destinada a
 Windows 10 e 11 de 64 bits.
 
@@ -25,8 +25,9 @@ Dependências de execução, fixadas por faixas em `requirements.txt`:
 | ttkbootstrap | tema e widgets da interface |
 | ONNX Runtime | inferência local das peças |
 
-`requirements-build.txt` acrescenta PyInstaller e Pillow. O modelo e sua
-licença são ativos do aplicativo, não dependências baixadas em execução.
+Pillow também participa da interface e do pré-processamento dos modelos.
+`requirements-build.txt` acrescenta PyInstaller. Os modelos e suas
+licenças são ativos do aplicativo, não dependências baixadas em execução.
 
 ## Build local
 
@@ -35,7 +36,7 @@ Em um Windows com Python 3.12 e Inno Setup 6:
 ```powershell
 python -m pip install -r requirements-build.txt
 python -m unittest discover -s tests -v
-.\build_windows.ps1 -Version 0.3.0
+.\build_windows.ps1 -Version 0.4.1
 ```
 
 O script prepara o ícone, gera metadados de versão, executa o PyInstaller e
@@ -45,6 +46,11 @@ compila `packaging/installer.iss`. O resultado versionado fica em:
 
 O parâmetro `-SkipInstaller` pode ser usado para gerar apenas a pasta do
 aplicativo durante testes de empacotamento.
+`-SkipDependencies` permite reutilizar um ambiente de build já preparado.
+O repositório público está configurado também no build local. Antes de compilar
+o Setup, o script executa o EXE real com `--self-test --report ...` e verifica
+versão, repositório, peças e inferência dos três modelos. O build inclui a
+imagem MIT de regressão e o texto de sua licença para esse diagnóstico local.
 
 ## PyInstaller
 
@@ -55,6 +61,8 @@ aplicativo `windowed`, sem console. Ele inclui explicitamente:
 - ONNX Runtime;
 - ícones PNG e ICO;
 - `models/chess-tiles-v2.onnx`;
+- os dois modelos adicionais e o catálogo do ensemble;
+- as doze peças Cburnett, seu manifesto de hashes e sua licença;
 - licença MIT do fenshot e avisos de terceiros;
 - metadados de versão gerados no build.
 
@@ -78,30 +86,52 @@ pelo Inno Setup na pasta do programa.
 `.github/workflows/windows-release.yml` executa em `windows-latest` quando há:
 
 - push para `main`;
+- pull request para `main`;
 - tag no formato `v*`;
 - execução manual com uma versão informada.
 
 O job instala Python 3.12, executa todos os testes, gera o aplicativo e compila
 o instalador. Builds comuns ficam disponíveis como artefatos da ação. Uma
 GitHub Release só é criada para tags.
+O aplicativo empacotado passa por um diagnóstico sem janela. O instalador é
+executado em um diretório de teste, reinstalado ali e desinstalado; cada
+instalação executa novamente o diagnóstico do EXE instalado. Isso verifica
+reinstalação da mesma versão, sem alegar um teste de migração de todas as
+versões históricas. Relatórios e logs acompanham o artefato do CI.
+O job de publicação só recebe permissão de escrita depois do job Windows
+concluir. Pré-releases recebem essa classificação e não são oferecidas pelo
+atualizador do canal estável.
 
 Fluxo recomendado para publicar:
 
 1. atualizar `version.py` e os valores padrão de build quando necessário;
 2. executar os testes localmente;
 3. fazer commit e push em `main`;
-4. criar e enviar a tag correspondente, por exemplo `v0.3.0`;
+4. criar e enviar a tag correspondente, por exemplo `v0.4.1`;
 5. conferir o job e testar o instalador da Release em uma máquina limpa.
 
 Além do arquivo versionado, a automação cria
 `ChessBookDiagramExtractor-Setup.exe`. Esse nome permanente alimenta o botão de
 download do README, que sempre aponta para a última Release.
+`SHA256SUMS.txt` e `release.json` registram os tamanhos e hashes dos dois
+instaladores. São gerados somente depois da compilação e publicados junto dos
+arquivos, além do digest de asset fornecido pela API do GitHub.
+
+A v0.4.1 usa as [notas específicas da versão](RELEASE_NOTES_v0.4.1.md).
+O instalador oficial é o artefato produzido pelo job da tag, com a documentação
+do mesmo commit. Um instalador local anterior pode ter hash diferente e não
+deve substituir o arquivo produzido pelo CI. Depois da publicação, conferir
+tag, commit, estado estável e os quatro assets pela API do GitHub, além da
+igualdade entre os hashes publicados e o manifesto.
 
 ## Atualizador
 
 Ao iniciar ou por solicitação no menu **Opções**, a aplicação consulta
 `/releases/latest` na API do GitHub. A atualização é oferecida somente se a tag
 contiver uma versão semântica maior que a instalada.
+A comparação considera pré-releases e metadados de build. Drafts e
+pré-releases não são instalados pelo canal estável; ausência de Release e
+limitação de consultas recebem tratamento próprio.
 
 Antes de executar o instalador, o atualizador verifica:
 
@@ -113,7 +143,16 @@ Antes de executar o instalador, o atualizador verifica:
 
 O download é feito como `.partial` em uma pasta temporária. Somente após todas
 as verificações ele substitui o destino e inicia o Setup com `/SILENT`,
-`/CLOSEAPPLICATIONS` e `/NORESTART`.
+`/CLOSEAPPLICATIONS`, `/NORESTART`, `/NORESTARTAPPLICATIONS` e `/REOPENAPP=1`.
+O aplicativo fecha e o Setup reabre a versão instalada uma única vez. Consulte
+a [documentação dos parâmetros do Inno Setup](https://jrsoftware.org/ishelp/topic_setupcmdline.htm).
+
+Cada download usa um arquivo parcial único. **Cancelar download** remove esse
+arquivo e mantém a atualização disponível para uma nova tentativa. Erros de
+download são visíveis mesmo quando a oferta veio de uma consulta automática.
+Falhas da consulta silenciosa preservam o bloqueio dos controles de uma
+extração em andamento. O clique de instalação continua impedido durante
+extração ou revisão, evitando encerrar um trabalho aberto.
 
 ## Assinatura e SmartScreen
 

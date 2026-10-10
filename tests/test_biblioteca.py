@@ -15,6 +15,7 @@ from biblioteca_livros import (
     fen_exportacao,
     fen_completa,
     gerar_pgn,
+    selecionar_diagramas_pgn,
 )
 from extrair_tabuleiros_pdf import AnotacaoSaida, Candidato, criar_pdf_a4
 
@@ -200,6 +201,27 @@ class TesteExportacaoPgn(unittest.TestCase):
             )
             self.assertIn("Joao", destino.read_text(encoding="utf-8"))
             self.assertFalse(destino.with_suffix(".pgn.tmp").exists())
+
+    def test_exportacao_forca_pgn_e_recusa_pdf(self) -> None:
+        diagrama = [DiagramaSalvo(1, posicao="4r3/8/8/8/8/8/8/4R3")]
+        with tempfile.TemporaryDirectory() as temporaria:
+            pasta = Path(temporaria)
+            criado = exportar_pgn(pasta / "posicoes.txt", "Livro", diagrama, "")
+            self.assertEqual(criado.suffix, ".pgn")
+            self.assertTrue(criado.is_file())
+            with self.assertRaisesRegex(ValueError, "PDF"):
+                exportar_pgn(pasta / "livro.pdf", "Livro", diagrama, "")
+
+    def test_exportacao_parcial_omite_somente_posicoes_invalidas(self) -> None:
+        validos, omitidos = selecionar_diagramas_pgn(
+            [
+                DiagramaSalvo(1, posicao="4r3/8/8/8/8/8/8/4R3"),
+                DiagramaSalvo(2, posicao="invalida"),
+                DiagramaSalvo(3, posicao=None),
+            ]
+        )
+        self.assertEqual([diagrama.pagina for diagrama in validos], [1])
+        self.assertEqual(omitidos, [2, 3])
 
 
 if __name__ == "__main__":

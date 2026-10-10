@@ -32,8 +32,13 @@ from extrair_tabuleiros_pdf import (  # noqa: E402
     pontuar_tabuleiro,
     processar_pdf,
     remover_duplicados,
+    _quadros_de_imagens_pdf,
+    _ordenar_pontos,
+    corrigir_perspectiva,
+    renderizar_pagina,
+    _evidencia_grade_8x8,
 )
-from autoupdate import Atualizacao, ErroAtualizacao, baixar_atualizacao, chave_versao, consultar_atualizacao  # noqa: E402
+from autoupdate import Atualizacao, ErroAtualizacao, baixar_atualizacao, chave_versao, consultar_atualizacao, iniciar_instalador  # noqa: E402
 from interface_windows import InterfaceExtrator, caminho_recurso, sugerir_saida  # noqa: E402
 from version import PUBLISHER, __version__  # noqa: E402
 
@@ -142,6 +147,105 @@ def salvar_pagina_em_pdf(documento: fitz.Document, imagem: np.ndarray) -> None:
 
 
 class TesteDetector(unittest.TestCase):
+    def test_grade_resiste_a_bases_largas_cobrindo_os_cantos_inferiores(self) -> None:
+        imagem = np.full((320, 320), 255, np.uint8)
+        for linha in range(8):
+            for coluna in range(8):
+                x, y = coluna * 40, linha * 40
+                imagem[y:y + 40, x:x + 40] = 150 if (linha + coluna) % 2 else 250
+                cv2.rectangle(imagem, (x + 5, y + 22), (x + 35, y + 35), 0, -1)
+                cv2.circle(imagem, (x + 20, y + 18), 9, 0, -1)
+        correlacao, contraste, consistencia = _evidencia_grade_8x8(imagem)
+        self.assertGreater(correlacao, .9)
+        self.assertGreater(contraste, .25)
+        self.assertGreater(consistencia, .9)
+
+    def test_moldura_de_tabuleiro_hachurado_com_pecas_e_coordenadas(self) -> None:
+        pagina = np.full((700, 600, 3), 255, np.uint8)
+        for linha in range(8):
+            for coluna in range(8):
+                x, y = 120 + coluna * 40, 180 + linha * 40
+                if (linha + coluna) % 2:
+                    casa = np.full((40, 40, 3), 255, np.uint8)
+                    for diagonal in range(-40, 80, 4):
+                        cv2.line(casa, (diagonal, 0), (diagonal - 40, 40), (110,) * 3, 1)
+                    pagina[y:y + 40, x:x + 40] = casa
+                if linha in (0, 1, 6, 7):
+                    cv2.circle(pagina, (x + 20, y + 20), 13, (0,) * 3, -1)
+                cv2.putText(pagina, str(8 - linha), (95, y + 29), cv2.FONT_HERSHEY_SIMPLEX,
+                            .65, (0,) * 3, 1)
+        cv2.rectangle(pagina, (119, 179), (441, 501), (0,) * 3, 2)
+        for coluna in range(8):
+            cv2.putText(pagina, chr(97 + coluna), (130 + coluna * 40, 522),
+                        cv2.FONT_HERSHEY_SIMPLEX, .65, (0,) * 3, 1)
+        candidatos = detectar_tabuleiros(pagina, aceitar_quadrados=False)
+        self.assertEqual(len(candidatos), 1)
+        quadro = candidatos[0].quadro
+        np.testing.assert_allclose(quadro.min(axis=0), [119, 179], atol=5)
+        np.testing.assert_allclose(quadro.max(axis=0), [441, 501], atol=5)
+
+    def test_detecta_diagramas_pequenos_e_um_grande_na_pagina(self) -> None:
+        for tamanho in (10, 88):
+            with self.subTest(lado_casa=tamanho):
+                pagina = np.full((1100, 800, 3), 255, np.uint8)
+                tabuleiro = criar_tabuleiro(tamanho)
+                colar(pagina, tabuleiro, 30, 130)
+                encontrados = detectar_tabuleiros(pagina, aceitar_quadrados=False)
+                self.assertEqual(len(encontrados), 1)
+                self.assertGreater(encontrados[0].confianca, 0.5)
+
+    def test_perspectiva_e_corrigida_sem_perder_casas(self) -> None:
+        tabuleiro = criar_tabuleiro(40)
+        lado = tabuleiro.shape[0] - 1
+        origem = np.array([[0, 0], [lado, 0], [lado, lado], [0, lado]], np.float32)
+        destino = np.array([[90, 140], [445, 155], [420, 490], [105, 465]], np.float32)
+        pagina = cv2.warpPerspective(tabuleiro, cv2.getPerspectiveTransform(origem, destino),
+                                    (700, 900), borderValue=(255, 255, 255))
+        encontrados = detectar_tabuleiros(pagina, aceitar_quadrados=False)
+        self.assertEqual(len(encontrados), 1)
+        self.assertGreater(encontrados[0].confianca, 0.6)
+
+    def test_ordena_cantos_de_losango_sem_repetir_pontos(self) -> None:
+        pontos = np.array([[120, 10], [230, 120], [120, 230], [10, 120]], np.float32)
+        ordenados = _ordenar_pontos(pontos[[2, 0, 3, 1]])
+        self.assertEqual(len(np.unique(ordenados, axis=0)), 4)
+        self.assertGreater(cv2.contourArea(ordenados), 20000)
+        for invalidos in (np.zeros((4, 2)), pontos * np.nan):
+            with self.assertRaises(ValueError):
+                corrigir_perspectiva(criar_tabuleiro(), invalidos)
+
+    def test_duplicatas_respeitam_paginas_e_molduras_maiores(self) -> None:
+        imagem = criar_tabuleiro()
+        pequeno = np.array([[10, 10], [110, 10], [110, 110], [10, 110]], np.float32)
+        grande = np.array([[0, 0], [400, 0], [400, 400], [0, 400]], np.float32)
+        candidatos = [Candidato(1, pequeno, imagem, 0.9),
+                      Candidato(2, pequeno, imagem, 0.9),
+                      Candidato(1, grande, imagem, 0.1)]
+        self.assertEqual(len(remover_duplicados(candidatos)), 3)
+
+    def test_ordem_de_leitura_tolere_pequeno_desalinhamento_vertical(self) -> None:
+        imagem = criar_tabuleiro()
+        esquerdo = np.array([[30, 100], [200, 100], [200, 270], [30, 270]], np.float32)
+        direito = esquerdo + np.array([300, -3], np.float32)
+        abaixo = esquerdo + np.array([0, 300], np.float32)
+        candidatos = [Candidato(1, q, imagem, 0.9) for q in (direito, abaixo, esquerdo)]
+        resultado = remover_duplicados(candidatos)
+        self.assertEqual([(c.x, c.y) for c in resultado], [(30, 100), (330, 97), (30, 400)])
+
+    def test_caixas_raster_acompanham_rotacao_e_cropbox_do_pdf(self) -> None:
+        for rotacao in (0, 90, 180, 270):
+            with self.subTest(rotacao=rotacao), fitz.open() as pdf:
+                pagina = pdf.new_page(width=600, height=800)
+                ok, buffer = cv2.imencode('.png', criar_tabuleiro())
+                self.assertTrue(ok)
+                pagina.insert_image(fitz.Rect(140, 240, 340, 440), stream=buffer.tobytes())
+                pagina.set_cropbox(fitz.Rect(40, 50, 560, 750))
+                pagina.set_rotation(rotacao)
+                quadros = _quadros_de_imagens_pdf(pagina, 144)
+                self.assertEqual(len(quadros), 1)
+                recorte = corrigir_perspectiva(renderizar_pagina(pagina, 144), quadros[0])
+                self.assertGreater(pontuar_tabuleiro(recorte), 0.7)
+
     def test_pontuacao_distingue_tabuleiro_de_ruido(self) -> None:
         tabuleiro = criar_tabuleiro()
         ruido = np.random.default_rng(42).integers(0, 256, tabuleiro.shape, dtype=np.uint8)
@@ -185,37 +289,28 @@ class TesteDetector(unittest.TestCase):
         self.assertEqual(len(resultado), 1)
         self.assertEqual(resultado[0].confianca, 0.9)
 
-    def test_padrao_alternado_recupera_pagina_incompleta(self) -> None:
+    def test_quadrados_sem_grade_so_entram_em_busca_explicita(self) -> None:
         with tempfile.TemporaryDirectory() as pasta:
-            entrada = Path(pasta) / "alternado.pdf"
+            entrada = Path(pasta) / "quadrados.pdf"
             documento = fitz.open()
-            for _ in range(10):
-                documento.new_page(width=800, height=1100)
+            pagina = documento.new_page(width=600, height=800)
+            imagem = np.full((100, 100, 3), 180, dtype=np.uint8)
+            ok, buffer = cv2.imencode(".png", imagem)
+            self.assertTrue(ok)
+            pagina.insert_image(fitz.Rect(80, 120, 280, 320), stream=buffer.tobytes())
+            pagina.insert_image(fitz.Rect(80, 400, 380, 500), stream=buffer.tobytes())
             documento.save(entrada)
             documento.close()
 
-            imagem = criar_tabuleiro()
-
-            def candidato(pagina: int, y: float) -> Candidato:
-                quadro = np.array([[10, y], [300, y], [300, y + 290], [10, y + 290]], np.float32)
-                return Candidato(pagina, quadro, imagem, 0.42)
-
-            def detectar(_imagem, pagina=1, alta_sensibilidade=False, **_kwargs):
-                if pagina % 2 == 0:
-                    return []
-                if pagina == 5 and not alta_sensibilidade:
-                    return [candidato(pagina, 10)]
-                return [candidato(pagina, 10), candidato(pagina, 400)]
-
-            with (
-                patch("extrair_tabuleiros_pdf.renderizar_pagina", return_value=imagem),
-                patch("extrair_tabuleiros_pdf.detectar_tabuleiros", side_effect=detectar),
-            ):
-                total, encontrados = detectar_no_pdf(entrada)
-
-            self.assertEqual(total, 10)
-            self.assertEqual(len(encontrados), 10)
-            self.assertEqual(sum(item.pagina == 5 for item in encontrados), 2)
+            with fitz.open(entrada) as pdf:
+                quadros = _quadros_de_imagens_pdf(pdf[0], 72)
+            self.assertEqual(len(quadros), 1)
+            renderizada = np.full((800, 600, 3), 255, dtype=np.uint8)
+            candidatos = detectar_tabuleiros(renderizada, quadros_adicionais=quadros)
+            self.assertEqual(candidatos, [])
+            candidatos = detectar_tabuleiros(renderizada, quadros_adicionais=quadros, aceitar_quadrados=True)
+            self.assertEqual(len(candidatos), 1)
+            self.assertEqual(candidatos[0].confianca, 0.0)
 
 
 class TesteIntegracao(unittest.TestCase):
@@ -300,6 +395,16 @@ class TesteIntegracao(unittest.TestCase):
                 atualizacao,
                 abrir_url=lambda *_args, **_kwargs: RespostaFake(b"abcde"),
             )
+
+    def test_atualizador_solicita_reabertura_ao_instalador(self) -> None:
+        with tempfile.TemporaryDirectory() as pasta:
+            instalador = Path(pasta) / "setup.exe"
+            instalador.write_bytes(b"setup")
+            with patch("autoupdate.subprocess.Popen") as iniciar:
+                iniciar_instalador(instalador)
+            argumentos = iniciar.call_args.args[0]
+            self.assertIn("/REOPENAPP=1", argumentos)
+            iniciar.assert_called_once_with(argumentos, close_fds=True)
 
     def test_metadados_aceitam_versao_estavel_e_pre_release(self) -> None:
         self.assertEqual(validar_versao("1.2.3"), (1, 2, 3, 0))
@@ -411,6 +516,21 @@ class TesteIntegracao(unittest.TestCase):
                 interface.itens_biblioteca, "pt"
             ),
             [1],
+        )
+
+    def test_exportar_pgn_permanece_ativo_com_posicao_invalida(self) -> None:
+        interface = InterfaceExtrator.__new__(InterfaceExtrator)
+        interface.livro_em_edicao = MagicMock(idioma="pt")
+        interface.itens_biblioteca = [MagicMock(posicao="invalida")]
+        interface.indice_biblioteca = 0
+        interface.botao_exportar_pgn_biblioteca = MagicMock()
+        interface.rotulo_pendencias_biblioteca = MagicMock()
+        interface.botao_proximo_erro_biblioteca = MagicMock()
+
+        interface._atualizar_acoes_validacao_biblioteca()
+
+        interface.botao_exportar_pgn_biblioteca.configure.assert_called_once_with(
+            state="normal"
         )
 
     def test_pdf_sintetico_gera_um_diagrama_por_pagina_a4(self) -> None:

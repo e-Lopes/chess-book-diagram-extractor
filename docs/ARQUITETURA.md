@@ -16,6 +16,7 @@ A janela principal é responsável por:
 - iniciar e cancelar a operação;
 - traduzir eventos de progresso em percentual e estimativa de tempo;
 - abrir o visualizador após a criação do PDF das extrações;
+- salvar o livro na biblioteca antes da revisão e mostrar suas contagens;
 - consultar atualizações sem bloquear a interface.
 
 ### Extração
@@ -47,6 +48,13 @@ margem e classe original de cada casa. `ResultadoReconhecimento` mantém essas
 informações junto da posição sugerida. Essa estrutura evita perder dados que a
 segunda passagem precisa para tomar decisões.
 
+`reconhecimento_ensemble.py` combina os três modelos locais. Antes de dividir
+as casas, `alinhamento_tabuleiro.py` localiza a grade interna. O módulo
+`marcadores_diagrama.py` identifica pequenas bolinhas indicativas e
+`restricoes_reconhecimento.py` elege os reis sem ocupar essas casas vazias.
+Os votos originais continuam disponíveis em `DadosCasa`, com o campo
+`marcador_vazio` distinguindo a decisão geométrica da previsão dos modelos.
+
 ### Visualizador
 
 `revisor_forsyth.py` implementa `JanelaRevisaoForsyth`. O visualizador percorre
@@ -54,12 +62,24 @@ o PDF já extraído, mostra um diagrama por vez e permite:
 
 - navegar para o primeiro, anterior, próximo ou último diagrama;
 - consultar ou editar a posição;
+- trocar peças por clique ou arraste, com borda azul na casa selecionada;
+- comparar original e reconstrução, confirmar um diagrama conferido;
 - marcar um recorte como não sendo tabuleiro;
 - salvar as notações no PDF final.
 
 O visualizador é deliberadamente uma etapa de inspeção, não um formulário que
 obriga a confirmação de centenas de posições. Ao fechar antes de concluir, o
 estado é salvo para possível retomada.
+
+`visualizacao_diagramas.py` fornece a comparação, o seletor e a paleta usados
+nos dois revisores. A prévia reutiliza imagens das casas e mantém a foto
+original em cache; a exportação usa o desenho completo do tabuleiro.
+
+`biblioteca_livros.py` mantém cópias dos PDFs, posições, lados a jogar,
+localizações, exclusões e o campo `revisao_necessaria`. As colunas **Diagramas**,
+**OK** e **Ajustar / conferir** contam os itens não descartados. Uma notação
+inválida ou um reconhecimento incerto fica pendente; correções e confirmações
+manuais válidas permitem retomar a revisão sem executar os modelos novamente.
 
 ### Atualização
 
@@ -81,7 +101,8 @@ confirmação é feita pela interface.
 8. O ONNX Runtime classifica as 64 casas de cada diagrama.
 9. Uma segunda passagem cria referências do próprio livro e revê apenas casos
    ambíguos sob critérios conservadores.
-10. O visualizador é aberto na thread da interface.
+10. O livro, suas posições e o PDF original são salvos na biblioteca; depois,
+    o visualizador é aberto na thread da interface.
 11. Ao concluir, uma thread gera o PDF anotado, omite itens marcados como falsos
     positivos e acrescenta o índice Forsyth.
 12. Depois de uma gravação bem-sucedida, o rascunho é removido.
@@ -102,6 +123,20 @@ Operações caras provocadas por controles também são adiadas. Por exemplo,
 marcar “Não é um tabuleiro/diagrama” apenas invalida a biblioteca de referências;
 os descritores HOG são reconstruídos na próxima revisão, evitando travar o Tk.
 
+`revisao_assincrona.py` agrupa alterações próximas por 250 ms e executa uma
+revisão do livro por vez sobre cópias dos estados e das listas de referências.
+Imagens compartilhadas são apenas lidas. Resultados de uma geração antiga
+são descartados quando há nova edição; na aplicação dos resultados, edições
+manuais e digitação ainda não salva são preservadas. Somente a thread do Tk
+aplica posições e atualiza os widgets. Um pequeno indicador animado acompanha
+o trabalho, e as exportações aguardam os resultados sem bloquear o loop.
+Fechar a janela cancela callbacks e impede aplicar resultados depois de destruí-la.
+
+Na biblioteca, cliques próximos são agrupados em um salvamento de metadados
+após 250 ms. A prévia é atualizada antes dessa gravação; navegação, fechamento
+e exportação forçam o salvamento pendente, inclusive de posições inválidas.
+O salvamento não reabre o PDF nem atualiza toda a lista de livros a cada clique.
+
 ## Dados locais
 
 Os dados ficam em `%LOCALAPPDATA%\ChessBookDiagramExtractor`:
@@ -112,6 +147,10 @@ Os dados ficam em `%LOCALAPPDATA%\ChessBookDiagramExtractor`:
 | `app.log` | Diagnóstico de falhas e eventos relevantes |
 | `drafts/<impressão-digital>.json` | Retomada do visualizador |
 | `learning/<impressão-digital>.json` | Referências criadas por edições daquele livro |
+| `library/<id>/metadata.json` | Posições, revisão pendente e demais metadados do livro |
+| `library/<id>/metadata.json.bak` | Cópia anterior dos metadados |
+| `library/<id>/diagramas.pdf` | Cópia interna dos recortes |
+| `library/<id>/original.pdf` | Livro original usado na padronização |
 
 A impressão digital vincula aprendizado e rascunho ao PDF correspondente. Não
 há compartilhamento de exemplos entre livros. Referências de itens excluídos

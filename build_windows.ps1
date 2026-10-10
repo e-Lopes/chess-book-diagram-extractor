@@ -1,8 +1,9 @@
 param(
-    [string]$Version = "0.3.0",
-    [string]$Repository = "",
+    [string]$Version = "0.4.1",
+    [string]$Repository = "e-Lopes/chess-book-diagram-extractor",
     [string]$Publisher = "E-Lopes",
-    [switch]$SkipInstaller
+    [switch]$SkipInstaller,
+    [switch]$SkipDependencies
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,9 +17,11 @@ if (-not (Test-Path -LiteralPath $BuildPython)) {
 }
 
 Write-Host "Instalando/atualizando dependencias de build..."
+if (-not $SkipDependencies) {
 & $BuildPython -m pip install -r requirements-build.txt
 if ($LASTEXITCODE -ne 0) {
     throw "A instalacao das dependencias terminou com o codigo $LASTEXITCODE."
+}
 }
 
 Write-Host "Executando testes..."
@@ -48,6 +51,11 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
     throw "O PyInstaller terminou com o codigo $LASTEXITCODE."
 }
+$SelfTestReport = Join-Path $ProjectRoot 'build\selftest-packaged.json'
+$SelfTest = Start-Process -FilePath (Join-Path $ProjectRoot 'dist\ChessBookDiagramExtractor\ChessBookDiagramExtractor.exe') -ArgumentList @('--self-test', '--report', ('"' + $SelfTestReport + '"')) -WindowStyle Hidden -Wait -PassThru
+if ($SelfTest.ExitCode -ne 0) { throw "O aplicativo empacotado falhou no diagnóstico. Confira $SelfTestReport" }
+$SelfTestData = Get-Content -LiteralPath $SelfTestReport -Raw | ConvertFrom-Json
+if (-not $SelfTestData.ok -or $SelfTestData.versao -ne $Version -or $SelfTestData.repositorio -ne $Repository) { throw 'Metadados do aplicativo incoerentes.' }
 
 if ($SkipInstaller) {
     Write-Host "Aplicativo gerado em dist\ChessBookDiagramExtractor"
@@ -70,4 +78,7 @@ $ProjectURL = if ($Repository) { "https://github.com/$Repository" } else { "" }
 if ($LASTEXITCODE -ne 0) {
     throw "O Inno Setup terminou com o codigo $LASTEXITCODE."
 }
+Copy-Item -LiteralPath "release\ChessBookDiagramExtractor-Setup-v$Version.exe" -Destination 'release\ChessBookDiagramExtractor-Setup.exe'
+& $BuildPython packaging\prepare_release.py --version $Version
+if ($LASTEXITCODE -ne 0) { throw 'Falha ao gerar inventário SHA-256.' }
 Write-Host "Instalador concluido em release\ChessBookDiagramExtractor-Setup-v$Version.exe"

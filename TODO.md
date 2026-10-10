@@ -1,7 +1,7 @@
 # TODO — Biblioteca, visualizador e exportação PGN
 
-O visualizador existente em `revisor_forsyth.py`, que já exibe os diagramas e
-permite editar posições, será usado como base para estas funcionalidades.
+Funcionalidades concluídas até a v0.4.1. Os detalhes atuais estão nas
+[notas da versão](docs/RELEASE_NOTES_v0.4.1.md).
 
 ## Visualizador de diagramas
 
@@ -41,3 +41,16 @@ permite editar posições, será usado como base para estas funcionalidades.
 - [x] Testar a persistência e a reabertura dos livros da biblioteca interna.
 - [x] Testar a edição das FENs e a alternância do lado a jogar.
 - [x] Testar a definição do `Annotator` e a exportação do arquivo PGN.
+
+## Edição e reconhecimento na v0.4.1
+
+- [x] Comparação original → reconstrução com peças clássicas.
+- [x] Edição por clique e arraste de peças/vazio, com borda na casa selecionada.
+- [x] Prévia com cache e revisão do livro em segundo plano com progresso.
+- [x] Reis escolhidos pela confiança e alinhamento de bordas com coordenadas.
+- [x] Bolinhas indicativas reconhecidas como vazio sem apagar peças reais.
+- [x] Livro salvo na biblioteca antes de abrir a revisão.
+- [x] Contagens de diagramas OK e que precisam de ajuste/conferência.
+- [x] Exportação do livro com diagramas padronizados e preservação do texto.
+- [x] Atualização com validação do download e reabertura do aplicativo.
+- [x] 165 testes locais e 341 posições de referência exatas.

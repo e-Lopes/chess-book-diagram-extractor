@@ -6,7 +6,7 @@ import json
 import os
 import shutil
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
@@ -16,7 +16,12 @@ import fitz
 import numpy as np
 
 from extrair_tabuleiros_pdf import AnotacaoSaida, Candidato
-from notacao_forsyth import converter_idioma_para_padrao, validar_posicao
+from notacao_forsyth import (
+    ItemRevisao,
+    converter_idioma_para_padrao,
+    separar_posicao_lado,
+    validar_posicao,
+)
 
 
 SCHEMA_BIBLIOTECA = 1
@@ -34,6 +39,9 @@ class DiagramaSalvo:
     confianca: float = 0.0
     posicao: str | None = None
     lado_a_jogar: str = "w"
+    quadro_pdf: tuple[tuple[float, float], ...] = ()
+    excluir: bool | None = None
+    revisao_necessaria: bool = False
 
     def __post_init__(self) -> None:
         if self.lado_a_jogar not in ("w", "b"):
@@ -51,6 +59,7 @@ class LivroSalvo:
     atualizado_em: str
     diagramas: tuple[DiagramaSalvo, ...] = field(default_factory=tuple)
     pdf_interno: Path = field(default=Path(), compare=False)
+    pdf_original: Path | None = field(default=None, compare=False)
 
 
 class BibliotecaLivros:
@@ -78,6 +87,7 @@ class BibliotecaLivros:
         annotator: str = "",
         paginas_originais: int = 0,
         livro_id: str | None = None,
+        pdf_original: os.PathLike[str] | str | None = None,
     ) -> LivroSalvo:
         origem = Path(pdf)
         if not origem.is_file():
@@ -91,13 +101,25 @@ class BibliotecaLivros:
             livro_id = uuid.uuid4().hex
         pasta = self._pasta_livro(livro_id)
         pasta.mkdir(parents=True, exist_ok=True)
+        if pdf_original is not None:
+            fonte_original = Path(pdf_original)
+            copia_original = pasta / "original.pdf"
+            if fonte_original.resolve() != copia_original.resolve():
+                temporario_original = pasta / "original.pdf.tmp"
+                shutil.copyfile(fonte_original, temporario_original)
+                os.replace(temporario_original, copia_original)
         destino_pdf = pasta / "diagramas.pdf"
         if origem.resolve() != destino_pdf.resolve():
             temporario_pdf = pasta / "diagramas.pdf.tmp"
             shutil.copyfile(origem, temporario_pdf)
             os.replace(temporario_pdf, destino_pdf)
 
-        anterior = self.carregar(livro_id)
+        # Uma edição já traz todas as posições. Reabrir o livro aqui podia
+        # varrer o PDF para recuperar posições vazias em cada clique.
+        try:
+            anteriores = json.loads((pasta / "metadata.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            anteriores = {}
         agora = self._agora()
         conteudo = {
             "schema": SCHEMA_BIBLIOTECA,
@@ -106,7 +128,7 @@ class BibliotecaLivros:
             "annotator": annotator.strip(),
             "idioma": idioma,
             "paginas_originais": max(0, int(paginas_originais)),
-            "criado_em": anterior.criado_em if anterior else agora,
+            "criado_em": anteriores.get("criado_em", agora),
             "atualizado_em": agora,
             "diagramas": [asdict(item) for item in diagramas],
         }
@@ -118,10 +140,17 @@ class BibliotecaLivros:
         if metadados.is_file():
             shutil.copyfile(metadados, pasta / "metadata.json.bak")
         os.replace(temporario_json, metadados)
-        livro = self.carregar(livro_id)
-        if livro is None:  # pragma: no cover - protecao contra falha inesperada de E/S
-            raise OSError("Nao foi possivel reabrir o livro salvo.")
-        return livro
+        if not anteriores and any(item.posicao is None for item in diagramas):
+            recuperado = self.carregar(livro_id)
+            if recuperado is not None:
+                return recuperado
+        return LivroSalvo(
+            id=livro_id, titulo=conteudo["titulo"], annotator=conteudo["annotator"],
+            idioma=idioma, paginas_originais=conteudo["paginas_originais"],
+            criado_em=conteudo["criado_em"], atualizado_em=agora,
+            diagramas=tuple(diagramas), pdf_interno=destino_pdf,
+            pdf_original=(pasta / "original.pdf") if (pasta / "original.pdf").is_file() else None,
+        )
 
     def carregar(self, livro_id: str) -> LivroSalvo | None:
         try:
@@ -136,6 +165,9 @@ class BibliotecaLivros:
                     confianca=float(item.get("confianca", 0.0)),
                     posicao=item.get("posicao") if isinstance(item.get("posicao"), str) else None,
                     lado_a_jogar=item.get("lado_a_jogar", "w"),
+                    quadro_pdf=tuple(tuple(float(v) for v in ponto) for ponto in item.get("quadro_pdf", [])),
+                    excluir=item.get("excluir") if isinstance(item.get("excluir"), bool) else None,
+                    revisao_necessaria=bool(item.get("revisao_necessaria", False)),
                 )
                 for item in dados.get("diagramas", [])
                 if isinstance(item, dict)
@@ -169,6 +201,7 @@ class BibliotecaLivros:
                 atualizado_em=str(dados.get("atualizado_em", "")),
                 diagramas=diagramas,
                 pdf_interno=pdf,
+                pdf_original=(pasta / "original.pdf") if (pasta / "original.pdf").is_file() else None,
             )
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
             return None
@@ -195,10 +228,9 @@ class BibliotecaLivros:
                     ]
                     posicao = next(
                         (
-                            linha
+                            separar_posicao_lado(linha)[0]
                             for linha in linhas
                             if linha.count("/") == 7
-                            and not any(caractere.isspace() for caractere in linha)
                         ),
                         None,
                     )
@@ -209,11 +241,8 @@ class BibliotecaLivros:
         if not recuperados:
             return diagramas, {}
         restaurados = tuple(
-            DiagramaSalvo(
-                pagina=diagrama.pagina,
-                confianca=diagrama.confianca,
+            replace(diagrama,
                 posicao=recuperados.get(indice, diagrama.posicao),
-                lado_a_jogar=diagrama.lado_a_jogar,
             )
             for indice, diagrama in enumerate(diagramas)
         )
@@ -301,8 +330,22 @@ class BibliotecaLivros:
                     [[0, 0], [largura - 1, 0], [largura - 1, altura - 1], [0, altura - 1]],
                     dtype=np.float32,
                 )
-                candidatos.append(Candidato(diagrama.pagina, quadro, imagem, diagrama.confianca))
+                candidatos.append(Candidato(diagrama.pagina, quadro, imagem, diagrama.confianca, diagrama.quadro_pdf))
         return candidatos
+
+
+def diagramas_de_itens(candidatos: Sequence[Candidato], itens: Sequence[ItemRevisao], idioma: str) -> list[DiagramaSalvo]:
+    if len(candidatos) != len(itens):
+        raise ValueError("Cada diagrama precisa de um estado de revisão.")
+    return [DiagramaSalvo(c.pagina, c.confianca, i.posicao, i.lado_a_jogar, c.quadro_pdf,
+                         i.nao_e_tabuleiro, i.revisao_necessaria and not i.editada_manualmente)
+            for c, i in zip(candidatos, itens)]
+
+
+def resumir_diagramas(diagramas: Sequence[DiagramaSalvo], idioma: str) -> tuple[int, int, int]:
+    mantidos = [d for d in diagramas if d.excluir is not True]
+    pendentes = sum(d.revisao_necessaria or not validar_posicao(d.posicao or "", idioma)[0] for d in mantidos)
+    return len(mantidos), len(mantidos) - pendentes, pendentes
 
 
 def diagramas_de_anotacoes(
@@ -316,6 +359,7 @@ def diagramas_de_anotacoes(
             confianca=candidato.confianca,
             posicao=anotacao.posicao,
             lado_a_jogar=anotacao.lado_a_jogar,
+            quadro_pdf=candidato.quadro_pdf,
         )
         for candidato, anotacao in zip(candidatos, anotacoes)
         if not anotacao.excluir
@@ -355,7 +399,7 @@ def gerar_pgn(
 ) -> str:
     partidas: list[str] = []
     for indice, diagrama in enumerate(diagramas, start=1):
-        if not diagrama.posicao:
+        if diagrama.excluir or not diagrama.posicao:
             continue
         fen = fen_exportacao(diagrama.posicao, diagrama.lado_a_jogar, idioma)
         tags = [
@@ -374,6 +418,22 @@ def gerar_pgn(
     return "\n\n".join(partidas) + ("\n" if partidas else "")
 
 
+def selecionar_diagramas_pgn(
+    diagramas: Sequence[DiagramaSalvo], idioma: str = "pt"
+) -> tuple[list[DiagramaSalvo], list[int]]:
+    """Retorna posições exportáveis e índices (base 1) que devem ser omitidos."""
+    validos: list[DiagramaSalvo] = []
+    omitidos: list[int] = []
+    for indice, diagrama in enumerate(diagramas, start=1):
+        if diagrama.excluir:
+            continue
+        if diagrama.posicao and validar_posicao(diagrama.posicao, idioma)[0]:
+            validos.append(diagrama)
+        else:
+            omitidos.append(indice)
+    return validos, omitidos
+
+
 def exportar_pgn(
     destino: os.PathLike[str] | str,
     titulo: str,
@@ -382,6 +442,10 @@ def exportar_pgn(
     idioma: str = "pt",
 ) -> Path:
     caminho = Path(destino)
+    if caminho.suffix.lower() == ".pdf":
+        raise ValueError("O PGN não pode sobrescrever um arquivo PDF.")
+    if caminho.suffix.lower() != ".pgn":
+        caminho = caminho.with_suffix(".pgn")
     conteudo = gerar_pgn(titulo, diagramas, annotator, idioma)
     temporario = caminho.with_suffix(caminho.suffix + ".tmp")
     temporario.write_text(conteudo, encoding="utf-8", newline="\n")

@@ -41,11 +41,13 @@ from notacao_forsyth import (  # noqa: E402
     converter_padrao_para_portugues,
     decodificar_probabilidades,
     girar_posicao,
+    formatar_posicao_lado,
     normalizar_posicao,
     paridade_casa_modelo,
     remover_rascunho,
     salvar_referencias_manuais,
     salvar_rascunho,
+    separar_posicao_lado,
     validar_posicao,
     _descritor_casa,
 )
@@ -67,6 +69,12 @@ class CampoTextoFake:
 
 
 class TesteNotacaoForsyth(unittest.TestCase):
+    def test_formata_e_separa_posicao_com_lado_compatível(self) -> None:
+        posicao = "4r3/8/8/8/8/8/8/4R3"
+        self.assertEqual(formatar_posicao_lado(posicao, "b"), f"{posicao} b")
+        self.assertEqual(separar_posicao_lado(f"{posicao} b"), (posicao, "b"))
+        self.assertEqual(separar_posicao_lado(posicao, "b"), (posicao, "b"))
+
     def test_a8_e_a_casa_clara_do_canto_superior_esquerdo(self) -> None:
         self.assertEqual(paridade_casa_modelo(56), 0)  # a8
         self.assertEqual(paridade_casa_modelo(57), 1)  # b8
@@ -102,26 +110,36 @@ class TesteNotacaoForsyth(unittest.TestCase):
         self.assertEqual(len(confiancas), 64)
         self.assertEqual((minima, media), (1.0, 1.0))
 
-    def test_corrige_confusao_incerta_entre_peao_e_cavalo(self) -> None:
+    def test_confusao_peao_cavalo_preserva_a_hipotese_visual_mais_provavel(self) -> None:
         probabilidades = np.zeros((64, 13), dtype=np.float32)
         probabilidades[:, 0] = 1.0
-        # a2 e b2: cavalo foi o argmax, mas peão está próximo na fileira
-        # inicial. f6: empate técnico no sentido inverso para peças pretas.
+        # A fileira inicial e um empate técnico não comprovam a identidade.
         for indice in (8, 9):
             probabilidades[indice] = 0
             probabilidades[indice, ALFABETO_MODELO.index("N")] = 0.55
             probabilidades[indice, ALFABETO_MODELO.index("P")] = 0.40
+            probabilidades[indice, 0] = 0.05
         indice_f6 = 5 * 8 + 5
         probabilidades[indice_f6] = 0
         probabilidades[indice_f6, ALFABETO_MODELO.index("p")] = 0.52
         probabilidades[indice_f6, ALFABETO_MODELO.index("n")] = 0.46
+        probabilidades[indice_f6, 0] = 0.02
 
         padrao, _confiancas, minima, _media = decodificar_probabilidades(probabilidades)
         self.assertEqual(
             converter_padrao_para_portugues(padrao),
-            "8/8/5c2/8/8/8/PP6/8",
+            "8/8/5p2/8/8/8/CC6/8",
         )
-        self.assertAlmostEqual(minima, 0.40, places=5)
+        self.assertAlmostEqual(minima, 0.52, places=5)
+
+    def test_recusa_probabilidades_corrompidas_ou_em_ordem_incorreta(self) -> None:
+        base = np.zeros((64, 13), np.float32)
+        base[:, 0] = 1
+        for matriz in (base.T, base.reshape(32, 26), base * 0.5,
+                       np.full_like(base, np.nan), np.full_like(base, np.inf), base - 0.1):
+            with self.subTest(formato=matriz.shape):
+                with self.assertRaises(ValueError):
+                    decodificar_probabilidades(matriz)
 
     def test_validacao_normalizacao_e_oito_fileiras(self) -> None:
         posicao = "4r3/8/8/3d4/8/8/8/4R3"
@@ -258,6 +276,7 @@ class TesteRascunhoForsyth(unittest.TestCase):
         janela.variavel_excluir = MagicMock()
         janela.variavel_excluir.get.return_value = True
         janela.revisor_automatico = MagicMock()
+        janela._revisao_assincrona = MagicMock()
         janela._salvar_rascunho = MagicMock()
         janela._validar_digitacao = MagicMock()
 
@@ -266,6 +285,7 @@ class TesteRascunhoForsyth(unittest.TestCase):
         self.assertTrue(janela.itens[0].nao_e_tabuleiro)
         janela.revisor_automatico.definir_exclusao.assert_called_once_with(0, True)
         janela.revisor_automatico.revisar_itens.assert_not_called()
+        janela._revisao_assincrona.agendar.assert_called_once_with(janela.revisor_automatico, janela.itens)
 
     def test_alternancia_do_lado_a_jogar_e_salva_no_item(self) -> None:
         janela = JanelaRevisaoForsyth.__new__(JanelaRevisaoForsyth)
@@ -282,6 +302,39 @@ class TesteRascunhoForsyth(unittest.TestCase):
 
 
 class TesteRevisaoAutomaticaLivro(unittest.TestCase):
+    def test_exclusao_remove_contribuicao_ao_fundo_na_proxima_revisao(self) -> None:
+        probabilidades = np.zeros(13, np.float32)
+        probabilidades[0] = 1
+        casas = tuple(
+            DadosCasa(i * 2, f"{chr(ord('a') + i * 2)}1", 1,
+                      np.full((32, 32), 0.9, np.float32), probabilidades.copy(),
+                      "1", ("1", "Q", "B"), 1.0, 1.0)
+            for i in range(3)
+        )
+        resultado = ResultadoReconhecimento(
+            "8/8/8/8/8/8/8/8", 1.0, 1.0, False, False, False,
+            posicao_original_padrao="8/8/8/8/8/8/8/8", casas=casas,
+        )
+        revisor = RevisorAutomaticoLivro([resultado], idioma="en")
+        self.assertIn(1, revisor.fundos)
+        revisor.definir_exclusao(0, True)
+        revisor.revisar()
+        self.assertEqual(revisor.fundos, {})
+        revisor.definir_exclusao(0, False)
+        revisor.revisar()
+        self.assertIn(1, revisor.fundos)
+
+    def test_nova_edicao_substitui_rotulo_manual_anterior(self) -> None:
+        resultado = self._resultado_ambiguo()
+        revisor = RevisorAutomaticoLivro([resultado], idioma="en")
+        item = ItemRevisao.de_reconhecimento(resultado)
+        bispo = "8/8/8/8/8/8/8/B7"
+        dama = "8/8/8/8/8/8/8/Q7"
+        cavalo = "8/8/8/8/8/8/8/N7"
+        revisor.registrar_edicao(0, item, bispo, dama)
+        revisor.registrar_edicao(0, item, dama, cavalo)
+        self.assertEqual([ref.classe for ref in revisor.referencias_manuais], ["N"])
+
     @staticmethod
     def _imagem_dama() -> np.ndarray:
         imagem = np.full((32, 32), 0.90, dtype=np.float32)
@@ -496,6 +549,61 @@ class TesteRevisaoAutomaticaLivro(unittest.TestCase):
         self.assertEqual(dois_diagramas.referencias_automaticas, [])
 
 
+class TesteReconhecimentoRobusto(unittest.TestCase):
+    @staticmethod
+    def _reconhecedor_fake(probabilidades: list[np.ndarray]) -> ReconhecedorForsyth:
+        reconhecedor = ReconhecedorForsyth.__new__(ReconhecedorForsyth)
+        reconhecedor.idioma = "en"
+        reconhecedor._entrada = "input"
+        reconhecedor._saida = "output"
+        reconhecedor._sessao = MagicMock()
+        reconhecedor._sessao.run.side_effect = [[p] for p in probabilidades]
+        return reconhecedor
+
+    def test_casas_vazias_nao_mascaram_uma_peca_mal_recortada(self) -> None:
+        boa = np.full((64, 13), 0.07 / 12, np.float32)
+        boa[:, 0] = 0.93
+        for indice, classe in ((4, "K"), (60, "k"), (27, "Q")):
+            boa[indice, 0] = 0.07 / 12
+            boa[indice, ALFABETO_MODELO.index(classe)] = 0.93
+        ruim = np.full((64, 13), 0.001 / 12, np.float32)
+        ruim[:, 0] = 0.999
+        for indice, classe in ((4, "K"), (60, "k")):
+            ruim[indice, 0] = 0.001 / 12
+            ruim[indice, ALFABETO_MODELO.index(classe)] = 0.999
+        ruim[27] = 0.25 / 11
+        ruim[27, ALFABETO_MODELO.index("N")] = 0.40
+        ruim[27, ALFABETO_MODELO.index("Q")] = 0.35
+        self.assertGreater(ruim.max(axis=1).mean(), boa.max(axis=1).mean())
+        reconhecedor = self._reconhecedor_fake([ruim, *[boa] * 5])
+        resultado = reconhecedor.reconhecer(np.full((256, 256, 3), 255, np.uint8))
+        self.assertEqual(resultado.posicao, "4k3/8/8/8/3Q4/8/8/4K3")
+        self.assertTrue(resultado.confiavel)
+
+    def test_informa_coordenada_da_casa_ambigua(self) -> None:
+        probabilidades = np.zeros((64, 13), np.float32)
+        probabilidades[:, 0] = 1
+        for indice, classe in ((4, "K"), (60, "k")):
+            probabilidades[indice, 0] = 0
+            probabilidades[indice, ALFABETO_MODELO.index(classe)] = 1
+        probabilidades[8] = 0
+        probabilidades[8, ALFABETO_MODELO.index("N")] = 0.55
+        probabilidades[8, ALFABETO_MODELO.index("P")] = 0.45
+        reconhecedor = self._reconhecedor_fake([probabilidades] * 6)
+        resultado = reconhecedor.reconhecer(np.full((256, 256), 255, np.uint8))
+        self.assertIn("a2", resultado.aviso)
+        self.assertIn("N7", resultado.posicao)
+        self.assertFalse(resultado.confiavel)
+
+    def test_entrada_invalida_e_rejeitada_antes_da_inferencia(self) -> None:
+        for imagem in (np.zeros((0, 0), np.uint8), np.ones((64, 64), np.float32),
+                       np.ones((64, 64, 2), np.uint8), None):
+            reconhecedor = self._reconhecedor_fake([])
+            with self.assertRaises(ValueError):
+                reconhecedor.reconhecer(imagem)
+            reconhecedor._sessao.run.assert_not_called()
+
+
 class TesteModeloForsyth(unittest.TestCase):
     def test_modelo_tem_hash_fixado_e_executa_64_casas(self) -> None:
         modelo = caminho_modelo_padrao()
@@ -513,7 +621,13 @@ class TesteModeloForsyth(unittest.TestCase):
         self.assertEqual(resultado.casas[56].coordenada, "a8")
         self.assertEqual(resultado.casas[56].paridade, 0)
 
-    def test_nenhuma_fixture_publica_incorreta_e_marcada_confiavel(self) -> None:
+    def test_todas_as_fixtures_publicas_tem_notacao_exata(self) -> None:
+        self._verificar_fixtures(usar_ensemble=False)
+
+    def test_ensemble_preserva_posicoes_exatas_e_registra_tres_modelos(self) -> None:
+        self._verificar_fixtures(usar_ensemble=True)
+
+    def _verificar_fixtures(self, usar_ensemble: bool) -> None:
         pasta = PASTA_MODULO / "tests" / "fixtures" / "fenshot"
         esperadas = {
             "reddit-page-board.png": "2r5/pppd2b1/3p2p1/5cp1/P5C1/5p1P/1P2t2T/D4R2",
@@ -522,26 +636,55 @@ class TesteModeloForsyth(unittest.TestCase):
             "lichess-italian-horsey.png": "t1bdr1ct/pppp1ppp/2c5/2b1p3/2B1P3/5C2/PPPP1PPP/TCBDR2T",
             "lichess-queens-only-board-marble.png": "6r1/2D5/8/8/8/2d5/8/6R1",
         }
-        reconhecedor = ReconhecedorForsyth()
+        reconhecedor = ReconhecedorForsyth(usar_ensemble=usar_ensemble)
         confiaveis = 0
         orientacao_preta = {"reddit-page-board.png", "lichess-italian-black.png"}
         for nome, esperada in esperadas.items():
             imagem = cv2.imread(str(pasta / nome))
             self.assertIsNotNone(imagem, nome)
             candidatos = detectar_tabuleiros(imagem)
-            self.assertLessEqual(len(candidatos), 1, nome)
-            for candidato in candidatos:
-                resultado = reconhecedor.reconhecer(candidato.imagem)
-                if resultado.confiavel:
-                    confiaveis += 1
-                    if nome in orientacao_preta:
-                        esperada = girar_posicao(esperada)
-                    self.assertEqual(resultado.posicao, esperada, nome)
-                self.assertFalse(resultado.girado)
-        self.assertGreaterEqual(confiaveis, 2)
+            tabuleiros = [c for c in candidatos if c.confianca >= 0.2]
+            self.assertEqual(len(tabuleiros), 1, nome)
+            resultado = reconhecedor.reconhecer(tabuleiros[0].imagem)
+            if nome in orientacao_preta:
+                esperada = girar_posicao(esperada)
+            self.assertEqual(resultado.posicao, esperada, nome)
+            if not usar_ensemble:
+                self.assertTrue(resultado.confiavel, nome)
+            else:
+                self.assertTrue(all(len(c.previsoes_modelos) == 3 for c in resultado.casas))
+                divergencias = any(c.divergencia_modelos for c in resultado.casas)
+                if divergencias:
+                    self.assertFalse(resultado.confiavel, nome)
+                    self.assertIn("modelos divergiram", resultado.aviso)
+            confiaveis += int(resultado.confiavel)
+            self.assertFalse(resultado.girado)
+        if not usar_ensemble:
+            self.assertEqual(confiaveis, len(esperadas))
+        else:
+            self.assertGreaterEqual(confiaveis, 1)
 
 
 class TestePdfForsyth(unittest.TestCase):
+    def test_pdf_interno_pode_ser_atualizado_atomicamente(self) -> None:
+        with tempfile.TemporaryDirectory() as pasta_temporaria:
+            saida = Path(pasta_temporaria) / "interno.pdf"
+            imagem = np.full((80, 80, 3), 255, dtype=np.uint8)
+            quadro = np.array([[0, 0], [79, 0], [79, 79], [0, 79]], np.float32)
+            candidato = Candidato(1, quadro, imagem, 0.9)
+            criar_pdf_a4([candidato], saida)
+            posicao = "4r3/8/8/8/8/8/8/4R3"
+
+            criar_pdf_a4(
+                [candidato],
+                saida,
+                [AnotacaoSaida(posicao, lado_a_jogar="b")],
+            )
+
+            with fitz.open(saida) as documento:
+                self.assertIn(f"{posicao} b", documento[0].get_text())
+                self.assertNotIn("Possível falso positivo", documento[0].get_text())
+
     def test_anotacao_selecionavel_corresponde_a_cada_diagrama(self) -> None:
         with tempfile.TemporaryDirectory() as pasta_temporaria:
             saida = Path(pasta_temporaria) / "anotado.pdf"
@@ -555,7 +698,7 @@ class TestePdfForsyth(unittest.TestCase):
             criar_pdf_a4(
                 candidatos,
                 saida,
-                [AnotacaoSaida(posicao, False), AnotacaoSaida(None, True)],
+                [AnotacaoSaida(posicao, False, True), AnotacaoSaida(None, True)],
             )
             documento = fitz.open(saida)
             try:
@@ -568,8 +711,12 @@ class TestePdfForsyth(unittest.TestCase):
                 self.assertEqual(len(documento[0].get_images(full=True)), 1)
                 self.assertEqual(len(documento[1].get_images(full=True)), 1)
                 linhas_indice = documento[2].get_text().splitlines()
-                self.assertEqual(linhas_indice, [posicao, "posição não informada"])
+                self.assertEqual(
+                    linhas_indice,
+                    [f"{posicao} w", "White to move", "posição não informada w", "White to move"],
+                )
                 self.assertNotIn("Forsyth", documento[2].get_text())
+                self.assertNotIn("Possível falso positivo", "\n".join(p.get_text() for p in documento))
             finally:
                 documento.close()
 
@@ -590,7 +737,12 @@ class TestePdfForsyth(unittest.TestCase):
                     for pagina in documento[len(candidatos) :]
                     for linha in pagina.get_text().splitlines()
                 ]
-                self.assertEqual(linhas, [anotacao.posicao for anotacao in anotacoes])
+                esperadas = [
+                    linha
+                    for anotacao in anotacoes
+                    for linha in (f"{anotacao.posicao} w", "White to move")
+                ]
+                self.assertEqual(linhas, esperadas)
 
     def test_recorte_marcado_como_nao_tabuleiro_e_excluido_do_pdf_final(self) -> None:
         with tempfile.TemporaryDirectory() as pasta_temporaria:
@@ -614,7 +766,10 @@ class TestePdfForsyth(unittest.TestCase):
                 self.assertEqual(documento.page_count, 2)
                 self.assertIn("Página original (do pdf): 4", documento[0].get_text())
                 self.assertNotIn(removida, "\n".join(pagina.get_text() for pagina in documento))
-                self.assertEqual(documento[1].get_text().splitlines(), [mantida])
+                self.assertEqual(
+                    documento[1].get_text().splitlines(),
+                    [f"{mantida} w", "White to move"],
+                )
 
 
 if __name__ == "__main__":

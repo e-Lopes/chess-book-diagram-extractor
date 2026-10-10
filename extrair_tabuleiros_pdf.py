@@ -43,6 +43,7 @@ class Candidato:
     quadro: np.ndarray
     imagem: np.ndarray
     confianca: float
+    quadro_pdf: tuple[tuple[float, float], ...] = ()
 
     @property
     def x(self) -> float:
@@ -73,17 +74,53 @@ class ResultadoExtracao:
 
 def _ordenar_pontos(pontos: np.ndarray) -> np.ndarray:
     pontos = np.asarray(pontos, dtype=np.float32).reshape(4, 2)
-    soma = pontos.sum(axis=1)
-    diferenca = np.diff(pontos, axis=1).ravel()
-    return np.array(
-        [
-            pontos[np.argmin(soma)],
-            pontos[np.argmin(diferenca)],
-            pontos[np.argmax(soma)],
-            pontos[np.argmax(diferenca)],
-        ],
-        dtype=np.float32,
-    )
+    if not np.isfinite(pontos).all() or len(np.unique(pontos, axis=0)) != 4:
+        raise ValueError("O quadro precisa ter quatro pontos distintos e finitos.")
+    centro = pontos.mean(axis=0)
+    angulos = np.arctan2(pontos[:, 1] - centro[1], pontos[:, 0] - centro[0])
+    ordenados = pontos[np.argsort(angulos)]
+    # Ordenar por soma/diferença separadamente repetia cantos em losangos.
+    inicio = min(range(4), key=lambda i: (float(ordenados[i].sum()), float(ordenados[i, 1])))
+    ordenados = np.roll(ordenados, -inicio, axis=0)
+    if not cv2.isContourConvex(ordenados) or cv2.contourArea(ordenados) < 1.0:
+        raise ValueError("O quadro precisa ser um quadrilátero convexo com área positiva.")
+    return ordenados
+
+
+def _ajustar_quadro_ao_contorno(quadro: np.ndarray, contorno: np.ndarray) -> np.ndarray:
+    """Ajusta retas aos lados, evitando cantos imprecisos da simplificação."""
+    pontos = contorno.reshape(-1, 2).astype(np.float32)
+    retas: list[tuple[np.ndarray, np.ndarray]] = []
+    for inicio, fim in zip(quadro, np.roll(quadro, -1, axis=0)):
+        vetor = fim - inicio
+        comprimento = float(np.linalg.norm(vetor))
+        direcao = vetor / comprimento
+        projecao = (pontos - inicio) @ direcao
+        distancia = np.abs((pontos[:, 0] - inicio[0]) * direcao[1] - (pontos[:, 1] - inicio[1]) * direcao[0])
+        selecionados = pontos[
+            (projecao > comprimento * 0.1) & (projecao < comprimento * 0.9)
+            & (distancia < max(2.0, comprimento * 0.035))
+        ]
+        if len(selecionados) < 4 or np.ptp(selecionados @ direcao) < comprimento * 0.4:
+            return quadro
+        reta = cv2.fitLine(selecionados, cv2.DIST_HUBER, 0, 0.01, 0.01).ravel()
+        retas.append((reta[:2], reta[2:]))
+    cantos = []
+    for indice in range(4):
+        direcao_a, origem_a = retas[indice - 1]
+        direcao_b, origem_b = retas[indice]
+        matriz = np.column_stack((direcao_a, -direcao_b))
+        if abs(float(np.linalg.det(matriz))) < 0.1:
+            return quadro
+        parametro = np.linalg.solve(matriz, origem_b - origem_a)[0]
+        cantos.append(origem_a + parametro * direcao_a)
+    ajustado = np.asarray(cantos, dtype=np.float32)
+    if np.max(np.linalg.norm(ajustado - quadro, axis=1)) > _lado_do_quadro(quadro) * 0.06:
+        return quadro
+    try:
+        return _ordenar_pontos(ajustado)
+    except ValueError:
+        return quadro
 
 
 def _lado_do_quadro(quadro: np.ndarray) -> int:
@@ -144,39 +181,33 @@ def _evidencia_grade_8x8(cinza: np.ndarray) -> tuple[float, float, float]:
     for inset in (0, 5, 9, 13, 17):
         area = base[inset : 360 - inset, inset : 360 - inset] if inset else base
         normalizada = cv2.resize(area, (320, 320), interpolation=cv2.INTER_AREA)
-        assinatura = np.zeros((8, 8), dtype=np.float32)
-        for linha in range(8):
-            for coluna in range(8):
-                y0, x0 = linha * 40 + 6, coluna * 40 + 6
-                casa = normalizada[y0 : (linha + 1) * 40 - 6, x0 : (coluna + 1) * 40 - 6]
-                assinatura[linha, coluna] = float(np.percentile(casa, 30))
+        casas = normalizada.reshape(8, 40, 8, 40).transpose(0, 2, 1, 3)
+        assinatura = np.percentile(casas[:, :, 6:-6, 6:-6], 30, axis=(2, 3)).astype(np.float32)
+        cantos = np.stack([casas[:, :, y:y + 6, x:x + 6].reshape(8, 8, -1)
+                          for y in (6, 28) for x in (6, 28)], axis=2)
+        # Peças pretas grandes podem dominar o centro de casas hachuradas.
+        # Os quatro cantos fornecem uma segunda estimativa do fundo da grade.
+        # O canto menos escurecido resiste a bases largas e coroas que invadem
+        # até três cantos; a hachura do fundo continua presente no restante.
+        assinatura_cantos = np.percentile(cantos, 30, axis=3).max(axis=2).astype(np.float32)
+        for assinatura_atual in (assinatura, assinatura_cantos):
+            mediana_a = float(np.median(assinatura_atual[paridade]))
+            mediana_b = float(np.median(assinatura_atual[~paridade]))
+            contraste = abs(mediana_a - mediana_b) / 255.0
+            centrada = assinatura_atual - float(np.mean(assinatura_atual))
+            denominador = float(np.linalg.norm(centrada) * np.linalg.norm(ideal))
+            correlacao = abs(float(np.sum(centrada * ideal)) / denominador) if denominador else 0.0
 
-        mediana_a = float(np.median(assinatura[paridade]))
-        mediana_b = float(np.median(assinatura[~paridade]))
-        contraste = abs(mediana_a - mediana_b) / 255.0
-        centrada = assinatura - float(np.mean(assinatura))
-        denominador = float(np.linalg.norm(centrada) * np.linalg.norm(ideal))
-        correlacao = abs(float(np.sum(centrada * ideal)) / denominador) if denominador else 0.0
-
-        escura = paridade if mediana_a < mediana_b else ~paridade
-        corretas = 0
-        comparacoes = 0
-        for linha in range(8):
-            for coluna in range(8):
-                for dl, dc in ((0, 1), (1, 0)):
-                    viz_linha, viz_coluna = linha + dl, coluna + dc
-                    if viz_linha >= 8 or viz_coluna >= 8:
-                        continue
-                    atual = assinatura[linha, coluna]
-                    vizinha = assinatura[viz_linha, viz_coluna]
-                    diferenca = vizinha - atual if escura[linha, coluna] else atual - vizinha
-                    corretas += int(diferenca >= 3.0)
-                    comparacoes += 1
-        consistencia = corretas / comparacoes if comparacoes else 0.0
-        if (0.55 * correlacao + 0.20 * min(1.0, contraste / 0.16) + 0.25 * consistencia) > (
-            0.55 * melhor[0] + 0.20 * min(1.0, melhor[1] / 0.16) + 0.25 * melhor[2]
-        ):
-            melhor = (correlacao, contraste, consistencia)
+            escura = paridade if mediana_a < mediana_b else ~paridade
+            sinais = np.where(escura, 1.0, -1.0)
+            horizontais = np.diff(assinatura_atual, axis=1) * sinais[:, :-1]
+            verticais = np.diff(assinatura_atual, axis=0) * sinais[:-1, :]
+            consistencia = float((np.count_nonzero(horizontais >= 3.0)
+                                  + np.count_nonzero(verticais >= 3.0)) / 112)
+            if (0.55 * correlacao + 0.20 * min(1.0, contraste / 0.16) + 0.25 * consistencia) > (
+                0.55 * melhor[0] + 0.20 * min(1.0, melhor[1] / 0.16) + 0.25 * melhor[2]
+            ):
+                melhor = (correlacao, contraste, consistencia)
     return melhor
 
 
@@ -275,7 +306,7 @@ def pontuar_tabuleiro(recorte: np.ndarray, alta_sensibilidade: bool = False) -> 
 def _mascaras_de_busca(cinza: np.ndarray) -> Iterable[np.ndarray]:
     borrada = cv2.GaussianBlur(cinza, (5, 5), 0)
     yield cv2.Canny(borrada, 45, 140)
-    yield cv2.adaptiveThreshold(
+    adaptativa = cv2.adaptiveThreshold(
         borrada,
         255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -283,20 +314,33 @@ def _mascaras_de_busca(cinza: np.ndarray) -> Iterable[np.ndarray]:
         41,
         11,
     )
+    yield adaptativa
+    # Hachuras e coordenadas podem unir-se à moldura e fazer minAreaRect
+    # inclinar um tabuleiro reto. Linhas longas preservam os quatro lados,
+    # removendo as diagonais curtas do preenchimento e os glifos ao redor.
+    comprimento = max(45, int(min(cinza.shape) * 0.045 * 0.70))
+    horizontais = cv2.morphologyEx(adaptativa, cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (comprimento, 1)))
+    verticais = cv2.morphologyEx(adaptativa, cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (1, comprimento)))
+    yield cv2.bitwise_or(horizontais, verticais)
 
 
 def _quadros_candidatos(imagem: np.ndarray) -> list[np.ndarray]:
     cinza = cv2.cvtColor(imagem, cv2.COLOR_BGR2GRAY)
     menor_dimensao = min(cinza.shape)
-    lado_minimo = max(70, int(menor_dimensao * 0.105))
-    lado_maximo = int(menor_dimensao * 0.82)
+    lado_minimo = max(64, int(menor_dimensao * 0.045))
+    lado_maximo = int(menor_dimensao * 1.02)
     quadros: list[np.ndarray] = []
 
     for mascara in _mascaras_de_busca(cinza):
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
         fechada = cv2.morphologyEx(mascara, cv2.MORPH_CLOSE, kernel, iterations=2)
-        contornos, _ = cv2.findContours(fechada, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        contornos, _ = cv2.findContours(fechada, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
         for contorno in contornos:
+            _, _, largura_caixa, altura_caixa = cv2.boundingRect(contorno)
+            if min(largura_caixa, altura_caixa) < lado_minimo:
+                continue
             perimetro = cv2.arcLength(contorno, True)
             if perimetro <= 0:
                 continue
@@ -307,7 +351,10 @@ def _quadros_candidatos(imagem: np.ndarray) -> list[np.ndarray]:
                 retangulo = cv2.minAreaRect(contorno)
                 quadro = cv2.boxPoints(retangulo).astype(np.float32)
 
-            q = _ordenar_pontos(quadro)
+            try:
+                q = _ordenar_pontos(quadro)
+            except ValueError:
+                continue
             larguras = [np.linalg.norm(q[1] - q[0]), np.linalg.norm(q[2] - q[3])]
             alturas = [np.linalg.norm(q[3] - q[0]), np.linalg.norm(q[2] - q[1])]
             largura, altura = float(np.mean(larguras)), float(np.mean(alturas))
@@ -317,7 +364,42 @@ def _quadros_candidatos(imagem: np.ndarray) -> list[np.ndarray]:
                 continue
             if cv2.contourArea(q.astype(np.float32)) < lado_minimo**2 * 0.7:
                 continue
+            q = _ajustar_quadro_ao_contorno(q, contorno)
             quadros.append(q)
+    return quadros
+
+
+def _quadros_de_imagens_pdf(pagina: fitz.Page, dpi: int) -> list[np.ndarray]:
+    """Converte caixas de imagens aproximadamente quadradas em coordenadas renderizadas."""
+    escala = dpi / 72.0
+    menor_dimensao = min(pagina.rect.width, pagina.rect.height) * escala
+    lado_minimo = max(64.0, menor_dimensao * 0.045)
+    lado_maximo = menor_dimensao * 1.02
+    quadros: list[np.ndarray] = []
+    try:
+        informacoes = pagina.get_image_info()
+    except (RuntimeError, ValueError):
+        return quadros
+    for informacao in informacoes:
+        transformacao = fitz.Matrix(informacao["transform"])
+        pontos = [fitz.Point(x, y) * transformacao * pagina.rotation_matrix
+                  for x, y in ((0, 0), (1, 0), (1, 1), (0, 1))]
+        quadro = np.array([(p.x * escala, p.y * escala) for p in pontos], dtype=np.float32)
+        try:
+            quadro = _ordenar_pontos(quadro)
+        except ValueError:
+            continue
+        lados = np.linalg.norm(quadro - np.roll(quadro, -1, axis=0), axis=1)
+        largura, altura = float(np.mean(lados[::2])), float(np.mean(lados[1::2]))
+        if min(largura, altura) < lado_minimo or max(largura, altura) > lado_maximo:
+            continue
+        if max(largura, altura) / max(1.0, min(largura, altura)) > 1.20:
+            continue
+        # Não estende recortes além da página usando pixels replicados.
+        if (quadro.min(axis=0) < -1).any() or (quadro.max(axis=0) >
+                np.array([pagina.rect.width, pagina.rect.height]) * escala + 1).any():
+            continue
+        quadros.append(quadro)
     return quadros
 
 
@@ -330,33 +412,63 @@ def _caixa(quadro: np.ndarray) -> tuple[float, float, float, float]:
     )
 
 
+def _areas_sobrepostas(a: np.ndarray, b: np.ndarray) -> tuple[float, float, float]:
+    a, b = _ordenar_pontos(a), _ordenar_pontos(b)
+    inter = float(cv2.intersectConvexConvex(a, b)[0])
+    return cv2.contourArea(a), cv2.contourArea(b), inter
+
+
 def _iou(a: np.ndarray, b: np.ndarray) -> float:
-    ax1, ay1, ax2, ay2 = _caixa(a)
-    bx1, by1, bx2, by2 = _caixa(b)
-    inter = max(0.0, min(ax2, bx2) - max(ax1, bx1)) * max(0.0, min(ay2, by2) - max(ay1, by1))
-    uniao = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
+    area_a, area_b, inter = _areas_sobrepostas(a, b)
+    uniao = area_a + area_b - inter
     return inter / uniao if uniao > 0 else 0.0
 
 
 def _sobreposicao_menor(a: np.ndarray, b: np.ndarray) -> float:
     """Fracao da menor caixa coberta; identifica contornos aninhados."""
-    ax1, ay1, ax2, ay2 = _caixa(a)
-    bx1, by1, bx2, by2 = _caixa(b)
-    inter = max(0.0, min(ax2, bx2) - max(ax1, bx1)) * max(0.0, min(ay2, by2) - max(ay1, by1))
-    menor_area = min((ax2 - ax1) * (ay2 - ay1), (bx2 - bx1) * (by2 - by1))
-    return inter / menor_area if menor_area > 0 else 0.0
+    area_a, area_b, inter = _areas_sobrepostas(a, b)
+    menor_area, maior_area = min(area_a, area_b), max(area_a, area_b)
+    # Uma moldura envolvendo vários diagramas não é duplicata de cada um.
+    return inter / menor_area if menor_area > 0 and menor_area / maior_area >= 0.5 else 0.0
+
+
+def _ordenar_leitura(candidatos: Sequence[Candidato]) -> list[Candidato]:
+    ordenados: list[Candidato] = []
+    linha: list[Candidato] = []
+    for candidato in sorted(candidatos, key=lambda item: (item.pagina, item.y, item.x)):
+        if linha:
+            ancora = linha[0]
+            altura = min(_caixa(ancora.quadro)[3] - ancora.y,
+                         _caixa(candidato.quadro)[3] - candidato.y)
+            if candidato.pagina != ancora.pagina or candidato.y - ancora.y > altura * 0.15:
+                ordenados.extend(sorted(linha, key=lambda item: item.x))
+                linha = []
+        linha.append(candidato)
+    ordenados.extend(sorted(linha, key=lambda item: item.x))
+    return ordenados
+
+
+def _mesmo_diagrama(candidato: Candidato, existente: Candidato, limite_iou: float) -> bool:
+    if candidato.pagina != existente.pagina:
+        return False
+    area_a, area_b, inter = _areas_sobrepostas(candidato.quadro, existente.quadro)
+    if inter / (area_a + area_b - inter) >= limite_iou:
+        return True
+    menor, maior = min(area_a, area_b), max(area_a, area_b)
+    if menor / maior >= 0.5 and inter / menor >= 0.78:
+        return True
+    # Um contorno parcial sem grade dentro de um tabuleiro confirmado também
+    # é redundante. Uma moldura maior contendo diagramas distintos permanece.
+    return (existente.confianca >= LIMIAR_PADRAO and candidato.confianca < LIMIAR_PADRAO
+            and inter / area_a >= 0.90)
 
 
 def remover_duplicados(candidatos: Sequence[Candidato], limite_iou: float = 0.55) -> list[Candidato]:
     mantidos: list[Candidato] = []
     for candidato in sorted(candidatos, key=lambda item: item.confianca, reverse=True):
-        if all(
-            _iou(candidato.quadro, existente.quadro) < limite_iou
-            and _sobreposicao_menor(candidato.quadro, existente.quadro) < 0.78
-            for existente in mantidos
-        ):
+        if not any(_mesmo_diagrama(candidato, existente, limite_iou) for existente in mantidos):
             mantidos.append(candidato)
-    return sorted(mantidos, key=lambda item: (item.pagina, item.y, item.x))
+    return _ordenar_leitura(mantidos)
 
 
 def detectar_tabuleiros(
@@ -364,12 +476,15 @@ def detectar_tabuleiros(
     pagina: int = 1,
     limiar: float = LIMIAR_PADRAO,
     alta_sensibilidade: bool = False,
+    quadros_adicionais: Sequence[np.ndarray] = (),
+    aceitar_quadrados: bool = False,
 ) -> list[Candidato]:
     encontrados: list[Candidato] = []
-    for quadro in _quadros_candidatos(imagem):
+    quadros = [*_quadros_candidatos(imagem), *quadros_adicionais]
+    for quadro in quadros:
         recorte = corrigir_perspectiva(imagem, quadro)
         confianca = pontuar_tabuleiro(recorte, alta_sensibilidade=alta_sensibilidade)
-        if confianca >= limiar:
+        if aceitar_quadrados or confianca >= limiar:
             encontrados.append(Candidato(pagina, quadro, recorte, confianca))
     return remover_duplicados(encontrados)
 
@@ -409,7 +524,14 @@ def detectar_no_pdf(
         for indice, pagina in enumerate(documento, start=1):
             _verificar_cancelamento(cancelado)
             imagem = renderizar_pagina(pagina, dpi)
-            candidatos = detectar_tabuleiros(imagem, pagina=indice)
+            candidatos = detectar_tabuleiros(
+                imagem,
+                pagina=indice,
+                quadros_adicionais=_quadros_de_imagens_pdf(pagina, dpi),
+            )
+            for candidato in candidatos:
+                candidato.quadro_pdf = tuple(tuple(float(v) for v in p)
+                                             for p in candidato.quadro * (72 / dpi))
             _verificar_cancelamento(cancelado)
             encontrados_por_pagina[indice] = candidatos
             print(f"Pagina {indice}/{total}: {len(candidatos)} diagrama(s)")
@@ -420,55 +542,12 @@ def detectar_no_pdf(
                     sum(len(itens) for itens in encontrados_por_pagina.values()),
                 )
 
-        # Livros de problemas frequentemente alternam uma pagina com dois
-        # diagramas e outra apenas com texto. Quando esse padrao aparece de
-        # forma clara, fazemos uma segunda passagem somente nas paginas que
-        # deveriam ter diagramas mas ficaram incompletas. Essa recuperacao
-        # privilegia nao perder problemas, sem relaxar o livro inteiro.
-        paginas_com_dois = [
-            numero for numero, itens in encontrados_por_pagina.items() if len(itens) >= 2
-        ]
-        contagem_paridade = {
-            0: sum(numero % 2 == 0 for numero in paginas_com_dois),
-            1: sum(numero % 2 == 1 for numero in paginas_com_dois),
-        }
-        total_referencia = sum(contagem_paridade.values())
-        paridade_diagramas = max(contagem_paridade, key=contagem_paridade.get)
-        padrao_alternado = (
-            total_referencia >= 4
-            and contagem_paridade[paridade_diagramas] / total_referencia >= 0.80
-        )
-        if padrao_alternado:
-            recuperados = 0
-            for numero in range(1, total + 1):
-                _verificar_cancelamento(cancelado)
-                atuais = encontrados_por_pagina.get(numero, [])
-                if numero % 2 != paridade_diagramas or len(atuais) >= 2:
-                    continue
-                imagem = renderizar_pagina(documento.load_page(numero - 1), dpi)
-                sensiveis = detectar_tabuleiros(
-                    imagem,
-                    pagina=numero,
-                    limiar=LIMIAR_ALTA_SENSIBILIDADE,
-                    alta_sensibilidade=True,
-                )
-                combinados = remover_duplicados([*atuais, *sensiveis])
-                if len(combinados) > len(atuais):
-                    recuperados += len(combinados) - len(atuais)
-                    encontrados_por_pagina[numero] = combinados
-                    print(
-                        f"Pagina {numero}: recuperados {len(combinados) - len(atuais)} "
-                        "diagrama(s) em alta sensibilidade"
-                    )
-            if recuperados:
-                print(f"Recuperacao por padrao alternado: {recuperados} diagrama(s)")
-
     encontrados = [
         candidato
         for numero in sorted(encontrados_por_pagina)
         for candidato in encontrados_por_pagina[numero]
     ]
-    return total, sorted(encontrados, key=lambda item: (item.pagina, item.y, item.x))
+    return total, _ordenar_leitura(encontrados)
 
 
 def criar_pdf_a4(
@@ -546,30 +625,20 @@ def criar_pdf_a4(
                 conteudo = anotacao.posicao if anotacao.posicao else "posição não informada"
                 inserir_texto_centralizado(
                     pagina,
-                    f"{conteudo}",
-                    y0 - 18,
+                    f"{conteudo} {anotacao.lado_a_jogar}",
+                    destino.y1 + 24,
                     tamanho_fonte=13.0,
                     fonte="cobo",
                     tamanho_minimo=10.0,
                 )
-
             inserir_texto_centralizado(
                 pagina,
                 f"Página original (do pdf): {candidato.pagina}",
-                destino.y1 + 24,
+                destino.y1 + (48 if anotacao is not None else 24),
                 tamanho_fonte=13.0,
                 fonte="hebo",
                 tamanho_minimo=11.0,
             )
-            if anotacao is not None and anotacao.possivel_falso_positivo:
-                inserir_texto_centralizado(
-                    pagina,
-                    "Possível falso positivo: talvez este recorte não seja um tabuleiro.",
-                    destino.y1 + 46,
-                    tamanho_fonte=10.0,
-                    fonte="hebo",
-                    tamanho_minimo=8.0,
-                )
             if anotacoes is None:
                 inserir_texto_centralizado(
                     pagina,
@@ -581,11 +650,11 @@ def criar_pdf_a4(
 
         if anotacoes_pdf is not None:
             # Acrescenta um índice textual na mesma ordem das páginas dos
-            # diagramas. A lista continua em novas páginas quando necessário,
-            # preservando uma posição por linha e sem prefixos ou numeração.
+            # diagramas. Cada posição ocupa duas linhas: Forsyth e lado a jogar.
             margem_indice = 42.0
             tamanho_fonte = 9.0
             altura_linha = 13.0
+            altura_item = 31.0
             y_inicial = margem_indice + tamanho_fonte
             y_limite = altura_a4 - margem_indice
             pagina_indice: fitz.Page | None = None
@@ -593,10 +662,10 @@ def criar_pdf_a4(
 
             for anotacao in anotacoes_pdf:
                 _verificar_cancelamento(cancelado)
-                if pagina_indice is None or y_linha > y_limite:
+                if pagina_indice is None or y_linha + altura_linha > y_limite:
                     pagina_indice = documento.new_page(width=largura_a4, height=altura_a4)
                     y_linha = y_inicial
-                texto = anotacao.posicao or "posição não informada"
+                texto = f"{anotacao.posicao or 'posição não informada'} {anotacao.lado_a_jogar}"
                 pagina_indice.insert_text(
                     fitz.Point(margem_indice, y_linha),
                     texto,
@@ -604,7 +673,14 @@ def criar_pdf_a4(
                     fontsize=tamanho_fonte,
                     color=(0.10, 0.13, 0.18),
                 )
-                y_linha += altura_linha
+                pagina_indice.insert_text(
+                    fitz.Point(margem_indice, y_linha + altura_linha),
+                    "White to move" if anotacao.lado_a_jogar == "w" else "Black to move",
+                    fontname="helv",
+                    fontsize=tamanho_fonte,
+                    color=(0.10, 0.13, 0.18),
+                )
+                y_linha += altura_item
 
         descritor, temporario = tempfile.mkstemp(prefix="diagramas_", suffix=".pdf", dir=saida.parent)
         os.close(descritor)
@@ -652,6 +728,7 @@ def carregar_diagramas_do_pdf_extraido(
                 Candidato(
                     pagina=original.pagina,
                     quadro=original.quadro.copy(),
+                    quadro_pdf=original.quadro_pdf,
                     imagem=imagem,
                     confianca=original.confianca,
                 )

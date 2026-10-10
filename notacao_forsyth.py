@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from marcadores_diagrama import casas_com_bolinhas
+
 import hashlib
 import base64
 import json
@@ -13,6 +15,14 @@ from typing import Sequence
 
 import cv2
 import numpy as np
+from alinhamento_tabuleiro import alinhar_grade
+from restricoes_reconhecimento import eleger_com_reis
+
+from reconhecimento_ensemble import (
+    ConfiguracaoModelo, ModeloONNX, PrevisaoModelo, carregar_catalogo,
+    combinar_probabilidades, preparar_casas_pillow, temperar_probabilidades,
+    validar_probabilidades as _validar_probabilidades,
+)
 
 
 ALFABETO_MODELO = "1KQRBNPkqrbnp"
@@ -99,6 +109,48 @@ def pecas_do_idioma(idioma: str) -> str:
 
 def normalizar_posicao(posicao: str, idioma: str = "pt") -> str:
     return compactar_tabuleiro(expandir_posicao(posicao, pecas_do_idioma(idioma)))
+
+
+def separar_posicao_lado(texto: str, lado_padrao: str = "w") -> tuple[str, str]:
+    """Separa a posição do sufixo opcional ``w``/``b`` usado na interface."""
+    if lado_padrao not in ("w", "b"):
+        lado_padrao = "w"
+    normalizado = " ".join(texto.strip().split())
+    partes = normalizado.rsplit(maxsplit=1)
+    if len(partes) == 2 and partes[1].lower() in ("w", "b"):
+        return partes[0], partes[1].lower()
+    return normalizado, lado_padrao
+
+
+def formatar_posicao_lado(posicao: str, lado_a_jogar: str) -> str:
+    lado = lado_a_jogar if lado_a_jogar in ("w", "b") else "w"
+    posicao = " ".join(posicao.strip().split())
+    return f"{posicao} {lado}" if posicao else lado
+
+
+def substituir_casa(texto: str, linha: int, coluna: int, peca: str, idioma: str = "pt") -> str:
+    """Edita uma casa visual (a8 = 0,0), preservando lado e campos FEN.
+
+    Colocar um rei move o rei da mesma cor, sem criar outro. Durante uma
+    correção pode faltar um rei; a validação existente impede exportá-la assim.
+    """
+    if not 0 <= linha < 8 or not 0 <= coluna < 8:
+        raise ValueError("Casa fora do tabuleiro.")
+    pecas = pecas_do_idioma(idioma)
+    if peca and peca not in pecas:
+        raise ValueError("Peça inválida.")
+    campos = texto.strip().split()
+    if not campos or len(campos) not in (1, 2, 6) or (len(campos) > 1 and campos[1] not in ("w", "b")):
+        raise ValueError("Posição inválida para edição.")
+    tabuleiro = expandir_posicao(campos[0], pecas)
+    reis = "Rr" if idioma == "pt" else "Kk"
+    if peca in reis and peca:
+        for casas in tabuleiro:
+            for indice, atual in enumerate(casas):
+                if atual == peca:
+                    casas[indice] = ""
+    tabuleiro[linha][coluna] = peca
+    return " ".join([compactar_tabuleiro(tabuleiro), *campos[1:]])
 
 
 def validar_posicao(posicao: str, idioma: str = "pt") -> tuple[bool, str]:
@@ -196,48 +248,13 @@ def paridade_casa_modelo(indice_casa: int) -> int:
     return (linha_imagem + coluna) % 2
 
 
-def _decodificar_com_ajustes(
+def _decodificar_probabilidades(
     probabilidades: np.ndarray,
-) -> tuple[str, list[float], float, float, int, np.ndarray]:
-    matriz = np.asarray(probabilidades, dtype=np.float32).reshape(64, 13)
+) -> tuple[str, list[float], float, float, np.ndarray]:
+    matriz = _validar_probabilidades(probabilidades)
     indices = np.argmax(matriz, axis=1)
-    ajustes = 0
-    # Alguns diagramas tipográficos antigos desenham a cabeça do peão com um
-    # contorno parecido com o cavalo do corpus de treinamento. Só corrigimos
-    # quando "cavalo" é uma leitura fraca e "peão" ficou muito próximo; casos
-    # claros e cavalos de alta confiança permanecem intocados.
-    for classe_cavalo, classe_peao, linha_inicial_peoes in (
-        (5, 6, 2),
-        (11, 12, 7),
-    ):
-        for indice_casa in range(64):
-            confianca_cavalo = float(matriz[indice_casa, classe_cavalo])
-            confianca_peao = float(matriz[indice_casa, classe_peao])
-            fileira = indice_casa // 8 + 1
-            if indices[indice_casa] == classe_cavalo:
-                proximidade_suficiente = (
-                    confianca_peao >= confianca_cavalo * 0.50
-                    if fileira == linha_inicial_peoes
-                    else confianca_peao >= confianca_cavalo * 0.80
-                )
-                if (
-                    confianca_cavalo < 0.70
-                    and confianca_peao >= 0.15
-                    and proximidade_suficiente
-                ):
-                    indices[indice_casa] = classe_peao
-                    ajustes += 1
-            elif indices[indice_casa] == classe_peao:
-                # No sentido inverso, só mexemos em um empate praticamente
-                # técnico. Isso cobre cavalos impressos com base estreita sem
-                # converter peões reconhecidos com segurança.
-                if (
-                    confianca_peao < 0.60
-                    and confianca_cavalo >= 0.15
-                    and confianca_cavalo >= confianca_peao * 0.85
-                ):
-                    indices[indice_casa] = classe_cavalo
-                    ajustes += 1
+    # A fileira da peça não comprova sua identidade. Confusões são revistas
+    # somente com evidência visual do livro, em RevisorAutomaticoLivro.
     confiancas = matriz[np.arange(64), indices].astype(float).tolist()
     classes = [ALFABETO_MODELO[indice] for indice in indices]
     posicao = _compactar_classes(classes)
@@ -246,13 +263,12 @@ def _decodificar_com_ajustes(
         confiancas,
         min(confiancas),
         sum(confiancas) / len(confiancas),
-        ajustes,
         indices.copy(),
     )
 
 
 def decodificar_probabilidades(probabilidades: np.ndarray) -> tuple[str, list[float], float, float]:
-    posicao, confiancas, minima, media, _ajustes, _indices = _decodificar_com_ajustes(probabilidades)
+    posicao, confiancas, minima, media, _indices = _decodificar_probabilidades(probabilidades)
     return posicao, confiancas, minima, media
 
 
@@ -290,6 +306,12 @@ def resolver_orientacao(posicao: str) -> tuple[str, bool, bool]:
 
 
 def _preparar_casas(imagem: np.ndarray, inset: float) -> np.ndarray:
+    if (not isinstance(imagem, np.ndarray) or imagem.dtype != np.uint8
+            or imagem.ndim not in (2, 3) or min(imagem.shape[:2]) < 8
+            or (imagem.ndim == 3 and imagem.shape[2] not in (3, 4))):
+        raise ValueError("Informe uma imagem uint8 em cinza, BGR ou BGRA com pelo menos 8×8 pixels.")
+    if not 0 <= inset < 0.5:
+        raise ValueError("O recuo das bordas precisa estar entre 0 e 0,5.")
     if imagem.ndim == 3:
         cinza = cv2.cvtColor(imagem, cv2.COLOR_BGR2GRAY)
     else:
@@ -323,6 +345,10 @@ class DadosCasa:
     top3: tuple[str, str, str]
     confianca: float
     margem: float
+    previsoes_modelos: tuple[PrevisaoModelo, ...] = ()
+    concordancia: float = 1.0
+    divergencia_modelos: bool = False
+    marcador_vazio: bool = False
 
 
 @dataclass(frozen=True)
@@ -359,6 +385,8 @@ class ResultadoReconhecimento:
     alteracoes_automaticas: tuple[AlteracaoAutomatica, ...] = ()
     duvidas_automaticas: tuple[DuvidaAutomatica, ...] = ()
     possivel_falso_positivo: bool = False
+    ajustes_reis: tuple[str, ...] = ()
+    limites_grade: tuple[int, int, int, int] = ()
 
 
 class ReconhecedorForsyth:
@@ -366,6 +394,8 @@ class ReconhecedorForsyth:
         self,
         caminho_modelo: os.PathLike[str] | str | None = None,
         idioma: str = "pt",
+        usar_ensemble: bool = True,
+        caminho_catalogo: os.PathLike[str] | str | None = None,
     ) -> None:
         pecas_do_idioma(idioma)
         self.idioma = idioma
@@ -379,30 +409,111 @@ class ReconhecedorForsyth:
             import onnxruntime as ort
         except ImportError as erro:
             raise RuntimeError("O componente onnxruntime não está disponível.") from erro
-        self._sessao = ort.InferenceSession(str(self.caminho_modelo), providers=["CPUExecutionProvider"])
+        opcoes = ort.SessionOptions()
+        opcoes.intra_op_num_threads = 2
+        opcoes.inter_op_num_threads = 1
+        self._sessao = ort.InferenceSession(str(self.caminho_modelo), sess_options=opcoes, providers=["CPUExecutionProvider"])
         self._entrada = self._sessao.get_inputs()[0].name
         self._saida = self._sessao.get_outputs()[0].name
+        self._configuracoes = (ConfiguracaoModelo("fenshot", NOME_MODELO, SHA256_MODELO, 1.0),)
+        self._modelos_adicionais: tuple[ModeloONNX, ...] = ()
+        if usar_ensemble and caminho_modelo is None:
+            catalogo = Path(caminho_catalogo) if caminho_catalogo else caminho_recurso("models", "ensemble.json")
+            configuracoes = carregar_catalogo(catalogo)
+            principal = configuracoes[0]
+            if (principal.nome != "fenshot" or principal.arquivo != NOME_MODELO
+                    or principal.sha256.upper() != SHA256_MODELO
+                    or principal.preprocessamento != "cv2_gray" or principal.classes != ALFABETO_MODELO):
+                raise ValueError("O primeiro modelo do catálogo precisa ser o fenshot incluído no aplicativo.")
+            self._modelos_adicionais = tuple(ModeloONNX(c, catalogo.parent) for c in configuracoes[1:])
+            self._configuracoes = configuracoes
+
+    def _prever_ensemble(
+        self, imagem: np.ndarray, inset: float, casas_principais: np.ndarray,
+    ) -> tuple[np.ndarray, tuple[np.ndarray, ...]]:
+        principal = _validar_probabilidades(self._sessao.run([self._saida], {self._entrada: casas_principais})[0])
+        configuracoes = getattr(self, "_configuracoes", ())
+        adicionais = getattr(self, "_modelos_adicionais", ())
+        temperatura = configuracoes[0].temperatura if configuracoes else 1.0
+        matrizes = [temperar_probabilidades(principal, temperatura)]
+        for modelo in adicionais:
+            preparo = modelo.configuracao.preprocessamento
+            casas = (casas_principais if preparo == "cv2_gray"
+                     else preparar_casas_pillow(imagem, inset, preparo))
+            matriz = modelo.prever(casas)
+            matrizes.append(temperar_probabilidades(matriz, modelo.configuracao.temperatura))
+        pesos = [c.peso for c in configuracoes] if configuracoes else [1.0]
+        return combinar_probabilidades(matrizes, pesos), tuple(matrizes)
 
     def reconhecer(self, imagem: np.ndarray) -> ResultadoReconhecimento:
+        # Primeiro remove coordenadas e molduras assimétricas; somente depois
+        # testa os pequenos recuos destinados às linhas externas da grade.
+        imagem, limites_grade = alinhar_grade(imagem)
+        marcadores = casas_com_bolinhas(imagem)
         melhor: tuple[
-            tuple[str, list[float], float, float, int, np.ndarray],
+            tuple[str, list[float], float, float, np.ndarray],
             np.ndarray,
             np.ndarray,
+            tuple[np.ndarray, ...],
         ] | None = None
-        for inset in (0.0, 0.01, 0.02, 0.03, 0.045):
+        melhor_score = -float("inf")
+        for inset in (0.0, 0.005, 0.01, 0.02, 0.03, 0.045):
             casas = _preparar_casas(imagem, inset)
-            probabilidades = self._sessao.run([self._saida], {self._entrada: casas})[0]
-            atual = _decodificar_com_ajustes(probabilidades)
-            if melhor is None or atual[3] > melhor[0][3]:
-                melhor = (atual, casas.copy(), np.asarray(probabilidades, dtype=np.float32).reshape(64, 13))
+            probabilidades, previsoes = self._prever_ensemble(imagem, inset, casas)
+            eleicao = probabilidades.copy()
+            if marcadores:
+                eleicao[list(marcadores)] = 0
+                eleicao[list(marcadores), 0] = 1
+            atual = _decodificar_probabilidades(eleicao)
+            matriz = _validar_probabilidades(probabilidades)
+            confiancas = np.asarray(atual[1])
+            ocupadas = atual[4] != 0
+            confianca_pecas = float(confiancas[ocupadas].mean()) if ocupadas.any() else atual[3]
+            # Casas vazias não devem esconder peças mal alinhadas em finais
+            # esparsos. As oito casas menos seguras também pesam na seleção.
+            score = (0.5 * atual[3] + 0.25 * confianca_pecas
+                     + 0.25 * float(np.sort(confiancas)[:8].mean())
+                     - 0.02 * _penalidade_plausibilidade(_classes_modelo_da_posicao(atual[0])))
+            if score > melhor_score:
+                melhor_score = score
+                melhor = (atual, casas.copy(), matriz.copy(), previsoes)
         assert melhor is not None
-        decodificado, imagens_casas, matriz_probabilidades = melhor
-        posicao_padrao, _confiancas, minima, media, ajustes, indices = decodificado
+        decodificado, imagens_casas, matriz_probabilidades, previsoes = melhor
+        posicao_padrao, _confiancas, minima, media, indices = decodificado
+        eleicao = matriz_probabilidades.copy()
+        if marcadores:
+            eleicao[list(marcadores)] = 0
+            eleicao[list(marcadores), 0] = 1
+        indices, casas_ajustadas = eleger_com_reis(eleicao, casas_vazias=marcadores)
+        posicao_padrao = _compactar_classes([ALFABETO_MODELO[int(i)] for i in indices])
+        confiancas_escolhidas = matriz_probabilidades[np.arange(64), indices]
+        sem_marcadores = np.ones(64, dtype=bool)
+        sem_marcadores[list(marcadores)] = False
+        confiancas_pecas = confiancas_escolhidas[sem_marcadores]
+        minima = float(confiancas_pecas.min()) if confiancas_pecas.size else 0.0
+        media = float(confiancas_pecas.mean()) if confiancas_pecas.size else 0.0
         dados_casas: list[DadosCasa] = []
+        configuracoes = getattr(self, "_configuracoes", ())
+        pesos = np.array([c.peso for c in configuracoes] if configuracoes else [1.0], np.float64)
+        pesos /= pesos.sum()
         for indice_casa in range(64):
             ordem = np.argsort(matriz_probabilidades[indice_casa])[::-1]
             coluna = indice_casa % 8
             linha_modelo = indice_casa // 8
+            votos = tuple(
+                PrevisaoModelo(
+                    nome=configuracoes[i].nome if configuracoes else "fenshot",
+                    classe=ALFABETO_MODELO[int(np.argmax(m[indice_casa]))],
+                    confianca=float(np.max(m[indice_casa])),
+                    probabilidades=tuple(float(p) for p in m[indice_casa]),
+                )
+                for i, m in enumerate(previsoes)
+            )
+            eleita = ALFABETO_MODELO[int(indices[indice_casa])]
+            concordancia = sum(float(peso) for voto, peso in zip(votos, pesos) if voto.classe == eleita)
+            divergencia = (concordancia < 0.75 or any(
+                voto.classe != eleita and voto.confianca >= LIMIAR_CONFIANCA for voto in votos
+            )) if len(votos) > 1 else False
             dados_casas.append(
                 DadosCasa(
                     indice=indice_casa,
@@ -410,13 +521,17 @@ class ReconhecedorForsyth:
                     paridade=paridade_casa_modelo(indice_casa),
                     imagem=imagens_casas[indice_casa].reshape(32, 32).copy(),
                     probabilidades=matriz_probabilidades[indice_casa].copy(),
-                    classe_original=ALFABETO_MODELO[int(indices[indice_casa])],
+                    classe_original=ALFABETO_MODELO[int(np.argmax(matriz_probabilidades[indice_casa]))],
                     top3=tuple(ALFABETO_MODELO[int(item)] for item in ordem[:3]),
                     confianca=float(matriz_probabilidades[indice_casa, indices[indice_casa]]),
                     margem=float(
                         matriz_probabilidades[indice_casa, ordem[0]]
                         - matriz_probabilidades[indice_casa, ordem[1]]
                     ),
+                    previsoes_modelos=votos,
+                    concordancia=concordancia,
+                    divergencia_modelos=divergencia,
+                    marcador_vazio=indice_casa in marcadores,
                 )
             )
         # Os livros processados usam orientação padronizada. A leitura mantém
@@ -425,25 +540,36 @@ class ReconhecedorForsyth:
         posicao_convertida = converter_padrao_para_idioma(posicao_orientada, self.idioma)
         plausibilidade = aviso_plausibilidade(posicao_convertida, self.idioma)
         motivos: list[str] = []
+        if marcadores:
+            motivos.append("Bolinhas indicativas tratadas como casas vazias: " + ", ".join(
+                f"{chr(97 + i % 8)}{i // 8 + 1}" for i in marcadores) + ".")
+        ajustes_reis = tuple(f"{chr(97 + i % 8)}{i // 8 + 1}" for i in casas_ajustadas)
+        if ajustes_reis:
+            motivos.append("Reis ajustados pela confiança em: " + ", ".join(ajustes_reis) + ". Confira essas casas.")
+        ambiguas = [casa.coordenada for casa in dados_casas
+                    if not casa.marcador_vazio and (casa.confianca < LIMIAR_CONFIANCA or casa.margem < MARGEM_AMBIGUIDADE)]
+        divergentes = [casa.coordenada for casa in dados_casas if casa.divergencia_modelos and not casa.marcador_vazio]
         if minima < LIMIAR_CONFIANCA:
             motivos.append("Algumas casas tiveram baixa confiança.")
+        if ambiguas:
+            motivos.append("Confira as casas: " + ", ".join(ambiguas) + ".")
+        if divergentes:
+            motivos.append("Os modelos divergiram nas casas: " + ", ".join(divergentes) + ".")
         if ambigua:
             motivos.append("A orientação não pôde ser determinada com segurança.")
         if plausibilidade:
             motivos.append(plausibilidade)
-        if ajustes:
-            motivos.append(
-                f"{ajustes} possível(is) confusão(ões) entre peão e cavalo foram ajustadas."
-            )
         return ResultadoReconhecimento(
             posicao=posicao_convertida,
             confianca_minima=minima,
             confianca_media=media,
             confiavel=(
                 minima >= LIMIAR_CONFIANCA
+                and not ambiguas
+                and not divergentes
                 and not ambigua
                 and not plausibilidade
-                and ajustes == 0
+                and not ajustes_reis
             ),
             girado=girado,
             orientacao_ambigua=ambigua,
@@ -451,6 +577,8 @@ class ReconhecedorForsyth:
             posicao_original_padrao=posicao_padrao,
             casas=tuple(dados_casas),
             possivel_falso_positivo=bool(plausibilidade),
+            ajustes_reis=ajustes_reis,
+            limites_grade=limites_grade,
         )
 
 
@@ -531,13 +659,14 @@ class RevisorAutomaticoLivro:
         for paridade in (0, 1):
             imagens = [
                 casa.imagem
-                for resultado in self.resultados_originais
-                if not resultado.possivel_falso_positivo
+                for indice_diagrama, resultado in enumerate(self.resultados_originais)
+                if not resultado.possivel_falso_positivo and indice_diagrama not in self.excluidos
                 for casa in resultado.casas
                 if casa.paridade == paridade
                 and casa.top3[0] == "1"
                 and casa.confianca >= LIMIAR_REFERENCIA
                 and casa.margem >= MARGEM_REFERENCIA
+                and not casa.divergencia_modelos
             ]
             if len(imagens) >= 3:
                 fundos[paridade] = np.median(np.stack(imagens), axis=0).astype(np.float32)
@@ -550,10 +679,12 @@ class RevisorAutomaticoLivro:
                 continue
             for casa in resultado.casas:
                 if (
-                    casa.classe_original == "1"
+                    casa.marcador_vazio
+                    or casa.classe_original == "1"
                     or casa.classe_original != casa.top3[0]
                     or casa.confianca < LIMIAR_REFERENCIA
                     or casa.margem < MARGEM_REFERENCIA
+                    or casa.divergencia_modelos
                 ):
                     continue
                 chave = (casa.classe_original, casa.paridade)
@@ -621,6 +752,14 @@ class RevisorAutomaticoLivro:
                 indice_diagrama,
                 manual=True,
             )
+            # Uma nova edição da mesma imagem substitui o rótulo anterior;
+            # manter os dois ensinava classes contraditórias ao revisor.
+            self.referencias_manuais = [
+                existente for existente in self.referencias_manuais
+                if not (existente.origem_diagrama == indice_diagrama
+                        and existente.paridade == casa.paridade
+                        and np.array_equal(existente.imagem, casa.imagem))
+            ]
             assinatura = hashlib.sha256(
                 np.clip(referencia.imagem * 255.0, 0, 255).astype(np.uint8).tobytes()
                 + referencia.classe.encode("ascii")
@@ -670,9 +809,15 @@ class RevisorAutomaticoLivro:
             item.alteracoes_automaticas = resultado.alteracoes_automaticas
             item.duvidas_automaticas = resultado.duvidas_automaticas
             item.confiavel = resultado.confiavel
+            item.revisao_necessaria = not resultado.confiavel
+
+    def substituir_resultado(self, indice: int, resultado: ResultadoReconhecimento) -> None:
+        self.resultados_originais[indice] = resultado
+        self._referencias_sujas = True
 
     def _referencias_por_chave(self) -> dict[tuple[str, int], list[tuple[ReferenciaCasa, np.ndarray]]]:
         if self._referencias_sujas:
+            self.fundos = self._criar_fundos()
             self.referencias_automaticas = self._criar_referencias_automaticas()
             self._referencias_sujas = False
         agrupadas: dict[tuple[str, int], list[tuple[ReferenciaCasa, np.ndarray]]] = {}
@@ -709,6 +854,8 @@ class RevisorAutomaticoLivro:
                 revisados.append(resultado)
                 continue
             for casa in resultado.casas:
+                if casa.marcador_vazio:
+                    continue
                 original = classes[casa.indice]
                 pares_conhecidos = any(
                     frozenset((original, alternativa)) in PARES_CONFUSAO
@@ -814,6 +961,8 @@ class RevisorAutomaticoLivro:
                     continue
                 propostas = classes.copy()
                 propostas[casa.indice] = alternativa
+                if any(propostas.count(rei) != classes.count(rei) for rei in ("K", "k")):
+                    continue
                 if _penalidade_plausibilidade(propostas) > _penalidade_plausibilidade(classes):
                     continue
                 classes = propostas
@@ -846,7 +995,7 @@ class RevisorAutomaticoLivro:
                     aviso=aviso,
                     alteracoes_automaticas=tuple(alteracoes),
                     duvidas_automaticas=tuple(duvidas),
-                    confiavel=resultado.confiavel and not duvidas,
+                    confiavel=resultado.confiavel and not duvidas and not alteracoes,
                 )
             )
         return revisados
@@ -867,6 +1016,8 @@ class ItemRevisao:
     editada_manualmente: bool = False
     casas: tuple[DadosCasa, ...] = ()
     lado_a_jogar: str = "w"
+    ajustes_reis: tuple[str, ...] = ()
+    revisao_necessaria: bool = False
 
     @classmethod
     def de_reconhecimento(cls, resultado: ResultadoReconhecimento) -> "ItemRevisao":
@@ -881,6 +1032,8 @@ class ItemRevisao:
             alteracoes_automaticas=resultado.alteracoes_automaticas,
             duvidas_automaticas=resultado.duvidas_automaticas,
             casas=resultado.casas,
+            ajustes_reis=resultado.ajustes_reis,
+            revisao_necessaria=not resultado.confiavel,
         )
 
 
@@ -991,6 +1144,7 @@ def salvar_rascunho(
                 "nao_e_tabuleiro": item.nao_e_tabuleiro,
                 "posicao_original": item.posicao_original,
                 "editada_manualmente": item.editada_manualmente,
+                "revisao_necessaria": item.revisao_necessaria,
                 "lado_a_jogar": item.lado_a_jogar,
                 "alteracoes_automaticas": [
                     {
@@ -1060,6 +1214,7 @@ def aplicar_rascunho(itens: Sequence[ItemRevisao], dados: Sequence[dict[str, obj
         item.girado = bool(salvo.get("girado", item.girado))
         item.nao_e_tabuleiro = bool(salvo.get("nao_e_tabuleiro", False))
         item.editada_manualmente = bool(salvo.get("editada_manualmente", False))
+        item.revisao_necessaria = bool(salvo.get("revisao_necessaria", item.revisao_necessaria))
         lado_a_jogar = salvo.get("lado_a_jogar", "w")
         item.lado_a_jogar = lado_a_jogar if lado_a_jogar in ("w", "b") else "w"
         posicao_original = salvo.get("posicao_original")

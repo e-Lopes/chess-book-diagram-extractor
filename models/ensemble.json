@@ -1,0 +1,29 @@
+{
+  "versao": 1,
+  "modelos": [
+    {
+      "nome": "fenshot",
+      "arquivo": "chess-tiles-v2.onnx",
+      "sha256": "883f6a8e639e6d6b6399b3fda0508ad772e3c6f9cefa2e678a13f27b9fa6248d",
+      "peso": 0.6,
+      "temperatura": 1.0,
+      "preprocessamento": "cv2_gray"
+    },
+    {
+      "nome": "linrock",
+      "arquivo": "linrock-tiles.onnx",
+      "sha256": "73c7d8a45b7d41372af761624edbe4f0c1f152b9a87c7403192c1332cfe66631",
+      "peso": 0.3,
+      "temperatura": 1.0,
+      "preprocessamento": "pillow_rgb_gray"
+    },
+    {
+      "nome": "chessbot",
+      "arquivo": "chessbot-tiles.onnx",
+      "sha256": "62b5afb3e247d525ded84e50fa8ba67309368a752eb9bc2f8dd15bae90420d1c",
+      "peso": 0.1,
+      "temperatura": 1.0,
+      "preprocessamento": "pillow_gray"
+    }
+  ]
+}

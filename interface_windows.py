@@ -23,14 +23,17 @@ from PIL import Image, ImageTk
 from ttkbootstrap.style import ThemeDefinition
 from ttkbootstrap.widgets import ToolTip
 
-from autoupdate import Atualizacao, baixar_atualizacao, consultar_atualizacao, iniciar_instalador
+from autoupdate import Atualizacao, AtualizacaoCancelada, baixar_atualizacao, consultar_atualizacao, iniciar_instalador
 from biblioteca_livros import (
     BibliotecaLivros,
     DiagramaSalvo,
     LivroDuplicadoError,
     LivroSalvo,
     diagramas_de_anotacoes,
+    diagramas_de_itens,
+    resumir_diagramas,
     exportar_pgn,
+    selecionar_diagramas_pgn,
 )
 from extrair_tabuleiros_pdf import (
     AnotacaoSaida,
@@ -41,6 +44,8 @@ from extrair_tabuleiros_pdf import (
     carregar_diagramas_do_pdf_extraido,
     criar_pdf_a4,
     detectar_no_pdf,
+    pontuar_tabuleiro,
+    LIMIAR_PADRAO,
 )
 from notacao_forsyth import (
     ItemRevisao,
@@ -49,10 +54,15 @@ from notacao_forsyth import (
     ResultadoReconhecimento,
     aviso_plausibilidade,
     caminho_rascunho,
+    formatar_posicao_lado,
     normalizar_posicao,
+    separar_posicao_lado,
     validar_posicao,
 )
 from revisor_forsyth import JanelaRevisaoForsyth
+from exportacao_padronizada_ui import exportar_livro_padronizado
+from visualizacao_diagramas import ComparadorDiagramas
+from reconhecimento_ui import reavaliar_imagem
 from version import GITHUB_REPOSITORY, __version__
 
 
@@ -181,6 +191,8 @@ class InterfaceExtrator:
         self.verificacao_silenciosa = False
         self.ultimo_resultado: ResultadoExtracao | None = None
         self.atualizacao_pendente: Atualizacao | None = None
+        self.baixando_atualizacao = False
+        self.cancelamento_atualizacao = threading.Event()
         self.janela_sobre: ttk.Toplevel | None = None
         self.janela_ajuda: ttk.Toplevel | None = None
         self.janela_revisao: JanelaRevisaoForsyth | None = None
@@ -767,16 +779,20 @@ class InterfaceExtrator:
         self.botao_excluir_livro.grid(row=0, column=2, sticky="ew", padx=(14, 0))
         self.lista_livros = ttk.Treeview(
             self.painel_lista_biblioteca,
-            columns=("diagramas", "criado_em"),
+            columns=("diagramas", "ok", "ajustar", "criado_em"),
             show="tree headings",
             height=14,
             selectmode="browse",
         )
         self.lista_livros.heading("#0", text="Livro")
         self.lista_livros.heading("diagramas", text="Diagramas")
+        self.lista_livros.heading("ok", text="OK")
+        self.lista_livros.heading("ajustar", text="Ajustar / conferir")
         self.lista_livros.heading("criado_em", text="Data de criação")
-        self.lista_livros.column("#0", width=440, stretch=True)
-        self.lista_livros.column("diagramas", width=110, anchor="center", stretch=False)
+        self.lista_livros.column("#0", width=360, stretch=True)
+        self.lista_livros.column("diagramas", width=95, anchor="center", stretch=False)
+        self.lista_livros.column("ok", width=65, anchor="center", stretch=False)
+        self.lista_livros.column("ajustar", width=145, anchor="center", stretch=False)
         self.lista_livros.column("criado_em", width=150, anchor="center", stretch=False)
         self.lista_livros.grid(row=1, column=0, sticky="nsew")
         self.lista_livros.bind("<<TreeviewSelect>>", self._ao_selecionar_livro)
@@ -787,8 +803,7 @@ class InterfaceExtrator:
         self.lista_livros.bind("<F2>", self._renomear_livro_por_teclado)
         self.lista_livros.bind("<Delete>", self._excluir_livro_por_teclado)
         self.separadores_biblioteca = [
-            tk.Frame(self.lista_livros, width=2, background="#A9B2BE"),
-            tk.Frame(self.lista_livros, width=2, background="#A9B2BE"),
+            tk.Frame(self.lista_livros, width=2, background="#A9B2BE") for _ in range(4)
         ]
 
         self.controles_paginacao_biblioteca = ttk.Frame(self.painel_lista_biblioteca)
@@ -851,10 +866,10 @@ class InterfaceExtrator:
     def _criar_editor_biblioteca(self) -> None:
         self.painel_editor_biblioteca = ttk.Frame(self.quadro_biblioteca)
         self.painel_editor_biblioteca.columnconfigure(
-            0, weight=3, minsize=420, uniform="colunas_editor"
+            0, weight=4, minsize=420
         )
         self.painel_editor_biblioteca.columnconfigure(
-            1, weight=2, minsize=320, uniform="colunas_editor"
+            1, weight=1, minsize=280
         )
         self.painel_editor_biblioteca.rowconfigure(1, weight=1)
 
@@ -895,15 +910,22 @@ class InterfaceExtrator:
             row=1, column=0, sticky="nsew", padx=(0, 16)
         )
         self.quadro_imagem_biblioteca.columnconfigure(0, weight=1)
-        self.quadro_imagem_biblioteca.rowconfigure(0, weight=1)
-        self.rotulo_imagem_biblioteca = ttk.Label(
-            self.quadro_imagem_biblioteca, anchor="center"
-        )
-        self.rotulo_imagem_biblioteca.grid(row=0, column=0, sticky="nsew")
+        self.quadro_imagem_biblioteca.rowconfigure(1, weight=1)
+        self.modo_imagem_biblioteca = tk.StringVar(value="comparar")
+        modos_imagem = ttk.Frame(self.quadro_imagem_biblioteca)
+        modos_imagem.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        for valor, texto in (("comparar", "Lado a lado"), ("original", "Original"), ("padronizado", "Padronizado")):
+            ttk.Radiobutton(modos_imagem, text=texto, value=valor,
+                variable=self.modo_imagem_biblioteca, command=self._atualizar_imagem_biblioteca,
+                bootstyle="primary toolbutton", padding=(10, 6)).pack(side="left", padx=(0, 6))
+        self.comparador_biblioteca = ComparadorDiagramas(self.quadro_imagem_biblioteca,
+            ao_editar=self._editar_pelo_tabuleiro_biblioteca)
+        self.comparador_biblioteca.grid(row=1, column=0, sticky="nsew")
+        self.rotulo_imagem_biblioteca = self.comparador_biblioteca.rotulos["original"]
         self.rotulo_origem_biblioteca = ttk.Label(
             self.quadro_imagem_biblioteca, anchor="center", bootstyle="secondary"
         )
-        self.rotulo_origem_biblioteca.grid(row=1, column=0, sticky="ew", pady=(7, 0))
+        self.rotulo_origem_biblioteca.grid(row=2, column=0, sticky="ew", pady=(7, 0))
         self.quadro_imagem_biblioteca.bind(
             "<Configure>", self._agendar_redimensionamento_biblioteca
         )
@@ -915,8 +937,8 @@ class InterfaceExtrator:
         painel.columnconfigure(0, weight=1)
         ttk.Label(
             painel,
-            text="Edição da Posição Forsyth",
-            style="EditorTitle.TLabel",
+            text="Correção das peças",
+            style="SectionTitle.TLabel",
         ).grid(
             row=1, column=0, sticky="w", pady=(20, 14)
         )
@@ -929,7 +951,6 @@ class InterfaceExtrator:
         )
         self.quadro_edicao_forsyth.grid(row=2, column=0, sticky="ew")
         self.quadro_edicao_forsyth.columnconfigure(0, weight=1)
-        self.quadro_edicao_forsyth.rowconfigure(1, minsize=285)
 
         modos_edicao = ttk.Frame(self.quadro_edicao_forsyth, bootstyle="light")
         modos_edicao.grid(row=0, column=0, sticky="ew", pady=(0, 4))
@@ -938,7 +959,7 @@ class InterfaceExtrator:
         self.modo_edicao_fen_biblioteca = tk.StringVar(value="completa")
         ttk.Radiobutton(
             modos_edicao,
-            text="Posição completa",
+            text="Visual",
             variable=self.modo_edicao_fen_biblioteca,
             value="completa",
             command=self._alternar_modo_edicao_fen,
@@ -947,7 +968,7 @@ class InterfaceExtrator:
         ).grid(row=0, column=0, sticky="ew", padx=(0, 4))
         ttk.Radiobutton(
             modos_edicao,
-            text="Editar por linhas",
+            text="Por linhas",
             variable=self.modo_edicao_fen_biblioteca,
             value="linhas",
             command=self._alternar_modo_edicao_fen,
@@ -955,19 +976,24 @@ class InterfaceExtrator:
             padding=(10, 7),
         ).grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
+        linha_forsyth = ttk.Frame(self.quadro_imagem_biblioteca)
+        linha_forsyth.grid(row=3, column=0, sticky="ew", pady=(10, 4))
+        ttk.Label(linha_forsyth, text="Forsyth completa", style="FieldLabel.TLabel").pack(side="left")
+        ttk.Button(linha_forsyth, text="Copiar", command=self._copiar_fen_biblioteca,
+                   bootstyle="secondary link").pack(side="right")
         self.campo_fen_biblioteca = tk.Text(
-            self.quadro_edicao_forsyth,
+            self.quadro_imagem_biblioteca,
             width=1,
-            height=4,
+            height=2,
             wrap="char",
-            font=("Consolas", 13),
+            font=("Consolas", 11),
             relief="solid",
             borderwidth=1,
             padx=12,
             pady=10,
             undo=True,
         )
-        self.campo_fen_biblioteca.grid(row=1, column=0, sticky="new", pady=(8, 8))
+        self.campo_fen_biblioteca.grid(row=4, column=0, sticky="ew", pady=(0, 4))
         self.campo_fen_biblioteca.bind("<KeyRelease>", self._validar_fen_biblioteca)
 
         self.editor_linhas_fen_biblioteca = ttk.Frame(
@@ -1005,6 +1031,13 @@ class InterfaceExtrator:
             font=("Segoe UI", 11, "bold"),
         )
         self.rotulo_validacao_biblioteca.grid(row=2, column=0, sticky="ew")
+        ttk.Label(painel, text="Clique em uma casa reconstruída para escolher uma peça ou vazio.",
+                  wraplength=260, bootstyle="secondary").grid(row=5, column=0, sticky="ew", pady=(16, 0))
+        self.botao_reavaliar_biblioteca = ttk.Button(painel, text="Reavaliar imagem",
+            command=self._reavaliar_imagem_biblioteca, bootstyle="secondary outline")
+        self.botao_reavaliar_biblioteca.grid(row=6, column=0, sticky="ew", pady=(12, 0))
+        ttk.Button(painel, text="Confirmar diagrama conferido", command=self._confirmar_diagrama_biblioteca,
+                   bootstyle="success outline").grid(row=7, column=0, sticky="ew", pady=(8, 0))
         self.quadro_edicao_forsyth.bind(
             "<Configure>",
             lambda evento: self.rotulo_validacao_biblioteca.configure(
@@ -1016,34 +1049,31 @@ class InterfaceExtrator:
         lados.grid(row=0, column=0, sticky="w")
         ttk.Label(
             lados,
-            text="Player to Move:",
+            text="Lado a jogar:",
             style="EditorField.TLabel",
         ).pack(side="left", padx=(0, 12))
         self.lado_preto_biblioteca = tk.BooleanVar(value=False)
-        self.rotulo_white_biblioteca = ttk.Label(
-            lados,
-            text="White",
-            bootstyle="primary",
-            font=("Segoe UI", 11, "bold"),
-        )
-        self.rotulo_white_biblioteca.pack(side="left")
-        self.switch_lado_biblioteca = ttk.Checkbutton(
-            lados,
-            text="",
-            variable=self.lado_preto_biblioteca,
-            command=self._alterar_lado_biblioteca,
-            bootstyle="primary round-toggle",
-        )
-        self.switch_lado_biblioteca.pack(side="left", padx=10)
-        self.rotulo_black_biblioteca = ttk.Label(
-            lados,
-            text="Black",
-            bootstyle="secondary",
-            font=("Segoe UI", 11, "bold"),
-        )
-        self.rotulo_black_biblioteca.pack(side="left")
+        self.botao_white_biblioteca = ttk.Radiobutton(lados, text="Brancas",
+            variable=self.lado_preto_biblioteca, value=False,
+            command=lambda: self._definir_lado_biblioteca("w"),
+            bootstyle="primary toolbutton", padding=(14, 8))
+        self.botao_white_biblioteca.pack(side="left")
+        self.botao_black_biblioteca = ttk.Radiobutton(lados, text="Pretas",
+            variable=self.lado_preto_biblioteca, value=True,
+            command=lambda: self._definir_lado_biblioteca("b"),
+            bootstyle="primary toolbutton", padding=(14, 8))
+        self.botao_black_biblioteca.pack(side="left", padx=(6, 0))
 
         self.annotator_biblioteca = tk.StringVar()
+        self.excluir_biblioteca = tk.BooleanVar(value=False)
+        self.mostrar_descartados_biblioteca = tk.BooleanVar(value=False)
+        self.checkbox_excluir_biblioteca = ttk.Checkbutton(painel,
+            text="Não é um tabuleiro — descartar", variable=self.excluir_biblioteca,
+            command=self._alterar_exclusao_biblioteca, bootstyle="danger")
+        self.checkbox_excluir_biblioteca.grid(row=3, column=0, sticky="w", pady=(12, 4))
+        ttk.Checkbutton(painel, text="Mostrar recortes descartados",
+            variable=self.mostrar_descartados_biblioteca, command=self._alternar_descartados_biblioteca,
+            bootstyle="secondary").grid(row=4, column=0, sticky="w", pady=(4, 0))
 
         navegacao = ttk.Frame(
             self.painel_editor_biblioteca, padding=(10, 8), bootstyle="@card"
@@ -1093,7 +1123,7 @@ class InterfaceExtrator:
             row=0, column=1, sticky="ns", padx=16
         )
         grupo_revisao = ttk.Frame(navegacao)
-        grupo_revisao.grid(row=0, column=2, sticky="e")
+        grupo_revisao.grid(row=1, column=0, columnspan=3, sticky="e", pady=(10, 0))
         self.botao_proximo_erro_biblioteca = ttk.Button(
             grupo_revisao,
             text="Próximo com erro (0)",
@@ -1114,9 +1144,12 @@ class InterfaceExtrator:
             padding=(10, 8),
         )
         self.botao_exportar_pgn_biblioteca.pack(side="left")
+        ttk.Button(grupo_revisao, text="Exportar livro padronizado",
+            command=self._exportar_pdf_padronizado_biblioteca, bootstyle="primary outline",
+            padding=(10, 8)).pack(side="left", padx=(8, 0))
         ToolTip(
             self.botao_exportar_pgn_biblioteca,
-            text="Disponível quando todas as posições Forsyth estiverem válidas.",
+            text="Exporta as posições válidas e informa as que forem omitidas.",
             delay=450,
         )
 
@@ -1189,10 +1222,7 @@ class InterfaceExtrator:
                 "end",
                 iid=livro.id,
                 text=livro.titulo,
-                values=(
-                    len(livro.diagramas),
-                    self._formatar_data_criacao(livro.criado_em),
-                ),
+                values=(*resumir_diagramas(livro.diagramas, livro.idioma), self._formatar_data_criacao(livro.criado_em)),
             )
         descricao_total = "livro" if total == 1 else "livros"
         self.texto_paginacao_biblioteca.set(
@@ -1243,7 +1273,9 @@ class InterfaceExtrator:
             return
         largura = self.lista_livros.winfo_width()
         altura = self.lista_livros.winfo_height()
-        posicoes = (largura - 260, largura - 150)
+        colunas = ("diagramas", "ok", "ajustar", "criado_em")
+        posicoes = [largura - sum(self.lista_livros.column(c, "width") for c in colunas[i:])
+                    for i in range(len(colunas))]
         for separador, posicao in zip(self.separadores_biblioteca, posicoes):
             separador.place(x=max(1, posicao), y=0, width=2, height=altura)
             separador.lift()
@@ -1438,6 +1470,9 @@ class InterfaceExtrator:
     def _carregar_livro_biblioteca(self, livro: LivroSalvo) -> None:
         try:
             candidatos = self.biblioteca.carregar_candidatos(livro)
+            for candidato, diagrama in zip(candidatos, livro.diagramas):
+                if diagrama.excluir is None:
+                    candidato.confianca = pontuar_tabuleiro(candidato.imagem)
         except (OSError, ValueError) as erro:
             self.logger.exception("Falha ao carregar livro da biblioteca.")
             self.eventos.put(("erro_biblioteca", erro))
@@ -1463,21 +1498,25 @@ class InterfaceExtrator:
                 confirmada=bool(diagrama.posicao),
                 posicao_original=diagrama.posicao or "",
                 lado_a_jogar=diagrama.lado_a_jogar,
+                nao_e_tabuleiro=(diagrama.excluir if diagrama.excluir is not None else candidato.confianca < LIMIAR_PADRAO),
+                revisao_necessaria=diagrama.revisao_necessaria,
             )
-            for diagrama in livro.diagramas
+            for diagrama, candidato in zip(livro.diagramas, candidatos)
         ]
         self.livro_em_edicao = livro
         self.estatistica_paginas.set(str(livro.paginas_originais or "—"))
-        self.estatistica_diagramas.set(str(len(livro.diagramas)))
+        self.estatistica_diagramas.set(str(sum(not item.nao_e_tabuleiro for item in itens)))
         self.estatistica_atencao.set(
-            str(sum(not diagrama.posicao for diagrama in livro.diagramas))
+            str(resumir_diagramas(livro.diagramas, livro.idioma)[2])
         )
-        self.estatistica_excluidos.set("0")
+        self.estatistica_excluidos.set(str(sum(item.nao_e_tabuleiro for item in itens)))
         self.revisando = True
         self._atualizar_estado_principal()
         self.candidatos_biblioteca = candidatos
         self.itens_biblioteca = itens
-        self.indice_biblioteca = 0
+        self.mostrar_descartados_biblioteca.set(False)
+        visiveis = self._indices_visiveis_biblioteca()
+        self.indice_biblioteca = visiveis[0] if visiveis else 0
         self.annotator_biblioteca.set(livro.annotator)
         self.painel_lista_biblioteca.grid_remove()
         self.painel_editor_biblioteca.grid(row=0, column=0, sticky="nsew")
@@ -1494,7 +1533,8 @@ class InterfaceExtrator:
 
     @staticmethod
     def _separar_linhas_forsyth(texto: str) -> list[str]:
-        linhas = texto.strip().replace("\n", "").split("/")
+        posicao, _lado = separar_posicao_lado(texto)
+        linhas = posicao.strip().replace("\n", "").split("/")
         return (linhas + [""] * 8)[:8]
 
     @staticmethod
@@ -1519,10 +1559,11 @@ class InterfaceExtrator:
         texto = self._juntar_linhas_forsyth(
             [campo.get() for campo in self.campos_linhas_fen_biblioteca]
         )
+        lado = "b" if self.lado_preto_biblioteca.get() else "w"
         self._sincronizando_fen_biblioteca = True
         try:
             self.campo_fen_biblioteca.delete("1.0", "end")
-            self.campo_fen_biblioteca.insert("1.0", texto)
+            self.campo_fen_biblioteca.insert("1.0", formatar_posicao_lado(texto, lado))
         finally:
             self._sincronizando_fen_biblioteca = False
         self._validar_fen_biblioteca(evento)
@@ -1530,52 +1571,121 @@ class InterfaceExtrator:
     def _alternar_modo_edicao_fen(self) -> None:
         if self.modo_edicao_fen_biblioteca.get() == "linhas":
             self._preencher_linhas_fen_biblioteca(self._texto_fen_biblioteca())
-            self.campo_fen_biblioteca.grid_remove()
-            self.editor_linhas_fen_biblioteca.grid(
-                row=1, column=0, sticky="new", pady=(3, 5)
-            )
+            self.editor_linhas_fen_biblioteca.grid(row=1, column=0, sticky="new", pady=(3, 5))
             self.campos_linhas_fen_biblioteca[0].focus_set()
         else:
-            self._ao_editar_linha_fen()
             self.editor_linhas_fen_biblioteca.grid_remove()
-            self.campo_fen_biblioteca.grid(
-                row=1, column=0, sticky="new", pady=(8, 8)
-            )
             self.campo_fen_biblioteca.focus_set()
         self._validar_fen_biblioteca()
 
+    def _copiar_fen_biblioteca(self) -> None:
+        self.raiz.clipboard_clear()
+        self.raiz.clipboard_append(self._texto_fen_biblioteca())
+
+    def _exportar_pdf_padronizado_biblioteca(self) -> None:
+        self._cancelar_salvamento_biblioteca_pendente()
+        try:
+            livro = self._persistir_editor_biblioteca(exigir_todas_validas=False, exigir_atual_valida=False)
+        except (OSError, ValueError) as erro:
+            messagebox.showerror("Não foi possível salvar", str(erro), parent=self.raiz)
+            return
+        exportar_livro_padronizado(self.raiz, livro.pdf_original, self.candidatos_biblioteca,
+                                  self.itens_biblioteca, livro.idioma, livro.titulo)
+
     def _texto_fen_biblioteca(self) -> str:
-        return self.campo_fen_biblioteca.get("1.0", "end-1c").strip().replace("\n", "")
+        return " ".join(self.campo_fen_biblioteca.get("1.0", "end-1c").split())
+
+    def _editar_pelo_tabuleiro_biblioteca(self, texto: str) -> None:
+        self.campo_fen_biblioteca.delete("1.0", "end")
+        self.campo_fen_biblioteca.insert("1.0", texto)
+        self.itens_biblioteca[self.indice_biblioteca].editada_manualmente = True
+        self._validar_fen_biblioteca()
+        self._atualizar_imagem_biblioteca()
+        self._agendar_salvamento_biblioteca(250, exigir_atual_valida=False)
+
+    def _confirmar_diagrama_biblioteca(self) -> None:
+        if self.livro_em_edicao is None or not self._indices_visiveis_biblioteca():
+            return
+        if self._salvar_diagrama_atual_biblioteca():
+            item = self.itens_biblioteca[self.indice_biblioteca]
+            item.editada_manualmente = True
+            item.revisao_necessaria = False
+            self._validar_fen_biblioteca()
+            self._agendar_salvamento_biblioteca(250)
+
+    def _reavaliar_imagem_biblioteca(self) -> None:
+        if not self._indices_visiveis_biblioteca():
+            return
+        self._salvar_diagrama_atual_biblioteca()
+        indice = self.indice_biblioteca
+        anterior = self.itens_biblioteca[indice]
+        def aplicar(resultado):
+            novo = ItemRevisao.de_reconhecimento(resultado)
+            novo.lado_a_jogar, novo.nao_e_tabuleiro = anterior.lado_a_jogar, anterior.nao_e_tabuleiro
+            self.itens_biblioteca[indice] = novo
+            self._exibir_diagrama_biblioteca()
+            self._salvar_automaticamente_biblioteca(exigir_todas_validas=False, exigir_atual_valida=False)
+        reavaliar_imagem(self.raiz, self.candidatos_biblioteca[indice].imagem, self.livro_em_edicao.idioma, aplicar)
 
     def _salvar_diagrama_atual_biblioteca(self) -> bool:
+        if hasattr(self, "mostrar_descartados_biblioteca") and not self._indices_visiveis_biblioteca():
+            return True
         if not self.itens_biblioteca:
             return False
         item = self.itens_biblioteca[self.indice_biblioteca]
-        texto = self._texto_fen_biblioteca()
+        texto, lado = separar_posicao_lado(
+            self._texto_fen_biblioteca(), item.lado_a_jogar
+        )
         valido, _mensagem = validar_posicao(texto, self.livro_em_edicao.idioma)
         if valido:
             texto = normalizar_posicao(texto, self.livro_em_edicao.idioma)
+            self._sincronizando_fen_biblioteca = True
+            try:
+                self.campo_fen_biblioteca.delete("1.0", "end")
+                self.campo_fen_biblioteca.insert(
+                    "1.0", formatar_posicao_lado(texto, lado)
+                )
+            finally:
+                self._sincronizando_fen_biblioteca = False
         item.posicao = texto
+        if texto != item.posicao_original:
+            item.editada_manualmente = True
         item.confirmada = valido
-        item.lado_a_jogar = "b" if self.lado_preto_biblioteca.get() else "w"
+        item.lado_a_jogar = lado
+        self.lado_preto_biblioteca.set(lado == "b")
+        self._atualizar_rotulos_lado_biblioteca()
         return valido
 
     def _validar_fen_biblioteca(self, _evento: object | None = None) -> None:
         if self.livro_em_edicao is None:
             return
-        texto = self._texto_fen_biblioteca()
+        item_atual = (
+            self.itens_biblioteca[self.indice_biblioteca]
+            if self.itens_biblioteca
+            else None
+        )
+        texto, lado = separar_posicao_lado(
+            self._texto_fen_biblioteca(),
+            item_atual.lado_a_jogar if item_atual else "w",
+        )
+        self.lado_preto_biblioteca.set(lado == "b")
+        self._atualizar_rotulos_lado_biblioteca()
         if (
-            self.modo_edicao_fen_biblioteca.get() == "completa"
-            and not self._sincronizando_fen_biblioteca
+            not self._sincronizando_fen_biblioteca
         ):
             self._preencher_linhas_fen_biblioteca(texto)
         valido, mensagem = validar_posicao(texto, self.livro_em_edicao.idioma)
         if self.itens_biblioteca:
             item_atual = self.itens_biblioteca[self.indice_biblioteca]
             item_atual.posicao = texto
+            item_atual.lado_a_jogar = lado
             item_atual.confirmada = valido
         if valido:
             aviso = aviso_plausibilidade(texto, self.livro_em_edicao.idioma)
+            if item_atual and item_atual.revisao_necessaria and not item_atual.editada_manualmente:
+                aviso = aviso or "Reconhecimento incerto. Confira as peças e confirme ou corrija o diagrama."
+            if not aviso and item_atual and not item_atual.editada_manualmente and item_atual.ajustes_reis:
+                aviso = "Reis ajustados pela confiança. Confira: " + ", ".join(item_atual.ajustes_reis) + "."
             self.rotulo_validacao_biblioteca.configure(
                 text=aviso or mensagem,
                 bootstyle="warning" if aviso else "success",
@@ -1588,6 +1698,8 @@ class InterfaceExtrator:
                 self._cancelar_salvamento_biblioteca_pendente()
                 self.estado_barra.set("Alterações pendentes")
         self._atualizar_acoes_validacao_biblioteca()
+        if hasattr(self, "modo_imagem_biblioteca") and self.modo_imagem_biblioteca.get() in ("comparar", "padronizado"):
+            self._agendar_redimensionamento_biblioteca()
 
     @staticmethod
     def _indices_invalidos_biblioteca(
@@ -1596,7 +1708,9 @@ class InterfaceExtrator:
         return [
             indice
             for indice, item in enumerate(itens)
-            if not validar_posicao(item.posicao, idioma)[0]
+            if item.nao_e_tabuleiro is not True and (
+                not validar_posicao(item.posicao, idioma)[0]
+                or (item.revisao_necessaria and not item.editada_manualmente))
         ]
 
     def _atualizar_acoes_validacao_biblioteca(self) -> None:
@@ -1606,7 +1720,7 @@ class InterfaceExtrator:
             self.itens_biblioteca, self.livro_em_edicao.idioma
         )
         self.botao_exportar_pgn_biblioteca.configure(
-            state="disabled" if invalidos or not self.itens_biblioteca else "normal"
+            state="normal" if self.itens_biblioteca else "disabled"
         )
         if invalidos:
             texto_pendencias = (
@@ -1625,7 +1739,7 @@ class InterfaceExtrator:
             indice != self.indice_biblioteca for indice in invalidos
         )
         self.botao_proximo_erro_biblioteca.configure(
-            text=f"Próximo com erro ({len(invalidos)})",
+            text=f"Próximo pendente ({len(invalidos)})",
             state="normal" if existem_outros else "disabled",
         )
 
@@ -1648,41 +1762,91 @@ class InterfaceExtrator:
     def _exibir_diagrama_biblioteca(self) -> None:
         if not self.itens_biblioteca:
             return
+        visiveis = self._indices_visiveis_biblioteca()
+        if not visiveis:
+            self.comparador_biblioteca.limpar("Nenhum tabuleiro identificado.\nAtive Mostrar recortes descartados para conferir os recortes.")
+            self.rotulo_contador_biblioteca.configure(text="0 tabuleiros")
+            self.rotulo_origem_biblioteca.configure(text="Recortes sem grade 8×8 ocultos")
+            self.campo_fen_biblioteca.configure(state="normal")
+            self.campo_fen_biblioteca.delete("1.0", "end")
+            self.campo_fen_biblioteca.configure(state="disabled")
+            for campo in self.campos_linhas_fen_biblioteca:
+                campo.configure(state="normal")
+                campo.delete(0, "end")
+                campo.configure(state="disabled")
+            for botao in (self.botao_primeiro_biblioteca, self.botao_anterior_biblioteca,
+                          self.botao_proximo_biblioteca, self.botao_ultimo_biblioteca,
+                          self.botao_white_biblioteca, self.botao_black_biblioteca,
+                          self.checkbox_excluir_biblioteca):
+                botao.configure(state="disabled")
+            self.rotulo_validacao_biblioteca.configure(text="Todos os recortes estão descartados.", bootstyle="secondary")
+            self._atualizar_acoes_validacao_biblioteca()
+            return
+        if self.indice_biblioteca not in visiveis:
+            self.indice_biblioteca = next((i for i in visiveis if i >= self.indice_biblioteca), visiveis[-1])
+        ordem = visiveis.index(self.indice_biblioteca)
+        self.campo_fen_biblioteca.configure(state="normal")
+        for campo in self.campos_linhas_fen_biblioteca:
+            campo.configure(state="normal")
+        for botao in (self.botao_white_biblioteca, self.botao_black_biblioteca, self.checkbox_excluir_biblioteca):
+            botao.configure(state="normal")
         item = self.itens_biblioteca[self.indice_biblioteca]
+        self.excluir_biblioteca.set(item.nao_e_tabuleiro)
         candidato = self.candidatos_biblioteca[self.indice_biblioteca]
         self.rotulo_contador_biblioteca.configure(
-            text=f"Diagrama {self.indice_biblioteca + 1} de {len(self.itens_biblioteca)}"
+            text=f"Diagrama {ordem + 1} de {len(visiveis)}"
         )
         self.rotulo_origem_biblioteca.configure(
             text=f"Página original: {candidato.pagina}"
         )
         self.campo_fen_biblioteca.delete("1.0", "end")
-        self.campo_fen_biblioteca.insert("1.0", item.posicao)
+        self.campo_fen_biblioteca.insert(
+            "1.0", formatar_posicao_lado(item.posicao, item.lado_a_jogar)
+        )
         self._preencher_linhas_fen_biblioteca(item.posicao)
         self.lado_preto_biblioteca.set(item.lado_a_jogar == "b")
         self._atualizar_rotulos_lado_biblioteca()
         self._atualizar_imagem_biblioteca()
         self.botao_anterior_biblioteca.configure(
-            state="normal" if self.indice_biblioteca > 0 else "disabled"
+            state="normal" if ordem > 0 else "disabled"
         )
         self.botao_primeiro_biblioteca.configure(
-            state="normal" if self.indice_biblioteca > 0 else "disabled"
+            state="normal" if ordem > 0 else "disabled"
         )
         self.botao_proximo_biblioteca.configure(
             state=(
                 "normal"
-                if self.indice_biblioteca < len(self.itens_biblioteca) - 1
+                if ordem < len(visiveis) - 1
                 else "disabled"
             )
         )
         self.botao_ultimo_biblioteca.configure(
             state=(
                 "normal"
-                if self.indice_biblioteca < len(self.itens_biblioteca) - 1
+                if ordem < len(visiveis) - 1
                 else "disabled"
             )
         )
         self._validar_fen_biblioteca()
+
+    def _indices_visiveis_biblioteca(self) -> list[int]:
+        mostrar = getattr(self, "mostrar_descartados_biblioteca", None)
+        return [i for i, item in enumerate(self.itens_biblioteca)
+                if mostrar is None or mostrar.get() or item.nao_e_tabuleiro is not True]
+
+    def _alterar_exclusao_biblioteca(self) -> None:
+        if not self.itens_biblioteca:
+            return
+        self._salvar_diagrama_atual_biblioteca()
+        self.itens_biblioteca[self.indice_biblioteca].nao_e_tabuleiro = self.excluir_biblioteca.get()
+        self.estatistica_excluidos.set(str(sum(i.nao_e_tabuleiro for i in self.itens_biblioteca)))
+        self.estatistica_diagramas.set(str(sum(not i.nao_e_tabuleiro for i in self.itens_biblioteca)))
+        self._salvar_automaticamente_biblioteca(exigir_todas_validas=False, exigir_atual_valida=False)
+        self._exibir_diagrama_biblioteca()
+
+    def _alternar_descartados_biblioteca(self) -> None:
+        self._salvar_automaticamente_biblioteca(exigir_todas_validas=False, exigir_atual_valida=False)
+        self._exibir_diagrama_biblioteca()
 
     def _agendar_redimensionamento_biblioteca(
         self, _evento: object | None = None
@@ -1696,15 +1860,29 @@ class InterfaceExtrator:
         )
 
     def _atualizar_rotulos_lado_biblioteca(self) -> None:
-        pretas = self.lado_preto_biblioteca.get()
-        self.rotulo_white_biblioteca.configure(
-            bootstyle="secondary" if pretas else "primary"
-        )
-        self.rotulo_black_biblioteca.configure(
-            bootstyle="primary" if pretas else "secondary"
-        )
+        self.botao_white_biblioteca.configure(bootstyle="primary toolbutton")
+        self.botao_black_biblioteca.configure(bootstyle="primary toolbutton")
+
+    def _definir_lado_biblioteca(self, lado: str) -> None:
+        self.lado_preto_biblioteca.set(lado == "b")
+        self._alterar_lado_biblioteca()
 
     def _alterar_lado_biblioteca(self) -> None:
+        if self.itens_biblioteca:
+            item = self.itens_biblioteca[self.indice_biblioteca]
+            lado = "b" if self.lado_preto_biblioteca.get() else "w"
+            posicao, _lado_anterior = separar_posicao_lado(
+                self._texto_fen_biblioteca(), item.lado_a_jogar
+            )
+            item.lado_a_jogar = lado
+            self._sincronizando_fen_biblioteca = True
+            try:
+                self.campo_fen_biblioteca.delete("1.0", "end")
+                self.campo_fen_biblioteca.insert(
+                    "1.0", formatar_posicao_lado(posicao, lado)
+                )
+            finally:
+                self._sincronizando_fen_biblioteca = False
         self._atualizar_rotulos_lado_biblioteca()
         self._agendar_salvamento_biblioteca(250)
 
@@ -1712,14 +1890,17 @@ class InterfaceExtrator:
         if self._salvamento_biblioteca_pendente is not None:
             self.raiz.after_cancel(self._salvamento_biblioteca_pendente)
             self._salvamento_biblioteca_pendente = None
+        if hasattr(self, "comparador_biblioteca"):
+            self.comparador_biblioteca.indicar_trabalho("")
 
-    def _agendar_salvamento_biblioteca(self, atraso: int = 650) -> None:
+    def _agendar_salvamento_biblioteca(self, atraso: int = 650, *, exigir_atual_valida: bool = True) -> None:
         self._cancelar_salvamento_biblioteca_pendente()
         self.estado_barra.set("Alterações pendentes")
+        self.comparador_biblioteca.indicar_trabalho("Salvando alterações…")
         self._salvamento_biblioteca_pendente = self.raiz.after(
             atraso,
             lambda: self._salvar_automaticamente_biblioteca(
-                exigir_todas_validas=False
+                exigir_todas_validas=False, exigir_atual_valida=exigir_atual_valida
             ),
         )
 
@@ -1727,22 +1908,10 @@ class InterfaceExtrator:
         self._redimensionamento_biblioteca_pendente = None
         if not self.candidatos_biblioteca:
             return
-        candidato = self.candidatos_biblioteca[self.indice_biblioteca]
-        imagem = candidato.imagem
-        if imagem.ndim == 3:
-            imagem = cv2.cvtColor(imagem, cv2.COLOR_BGR2RGB)
-        pil = Image.fromarray(imagem)
-        largura = max(300, self.quadro_imagem_biblioteca.winfo_width() - 24)
-        altura = max(300, self.quadro_imagem_biblioteca.winfo_height() - 54)
-        escala = min(largura / pil.width, altura / pil.height)
-        novo_tamanho = (
-            max(1, int(round(pil.width * escala))),
-            max(1, int(round(pil.height * escala))),
-        )
-        if novo_tamanho != pil.size:
-            pil = pil.resize(novo_tamanho, Image.Resampling.LANCZOS)
-        self._imagem_biblioteca_tk = ImageTk.PhotoImage(pil)
-        self.rotulo_imagem_biblioteca.configure(image=self._imagem_biblioteca_tk)
+        if not self._indices_visiveis_biblioteca():
+            return
+        self.comparador_biblioteca.exibir(self.candidatos_biblioteca[self.indice_biblioteca].imagem,
+            self._texto_fen_biblioteca(), self.livro_em_edicao.idioma, self.modo_imagem_biblioteca.get())
 
     def _navegar_biblioteca(self, deslocamento: int) -> None:
         if not self._salvar_automaticamente_biblioteca(
@@ -1751,10 +1920,11 @@ class InterfaceExtrator:
             exigir_atual_valida=False,
         ):
             return
-        novo = min(
-            len(self.itens_biblioteca) - 1,
-            max(0, self.indice_biblioteca + deslocamento),
-        )
+        visiveis = self._indices_visiveis_biblioteca()
+        if not visiveis:
+            return
+        ordem = visiveis.index(self.indice_biblioteca) if self.indice_biblioteca in visiveis else 0
+        novo = visiveis[min(len(visiveis) - 1, max(0, ordem + deslocamento))]
         if novo != self.indice_biblioteca:
             self.indice_biblioteca = novo
             self._exibir_diagrama_biblioteca()
@@ -1766,19 +1936,14 @@ class InterfaceExtrator:
             exigir_atual_valida=False,
         ):
             return
-        self.indice_biblioteca = min(len(self.itens_biblioteca) - 1, max(0, indice))
+        visiveis = self._indices_visiveis_biblioteca()
+        if not visiveis:
+            return
+        self.indice_biblioteca = next((i for i in visiveis if i >= max(0, indice)), visiveis[-1])
         self._exibir_diagrama_biblioteca()
 
     def _diagramas_editados_biblioteca(self) -> list[DiagramaSalvo]:
-        return [
-            DiagramaSalvo(
-                candidato.pagina,
-                candidato.confianca,
-                item.posicao,
-                item.lado_a_jogar,
-            )
-            for candidato, item in zip(self.candidatos_biblioteca, self.itens_biblioteca)
-        ]
+        return diagramas_de_itens(self.candidatos_biblioteca, self.itens_biblioteca, self.livro_em_edicao.idioma)
 
     def _persistir_editor_biblioteca(
         self,
@@ -1790,7 +1955,7 @@ class InterfaceExtrator:
         livro = self.livro_em_edicao
         if livro is None:
             raise ValueError("Nenhum livro esta aberto.")
-        if not atual_valido and exigir_atual_valida:
+        if not atual_valido and exigir_atual_valida and self.itens_biblioteca[self.indice_biblioteca].nao_e_tabuleiro is not True:
             _valido, mensagem = validar_posicao(
                 self.itens_biblioteca[self.indice_biblioteca].posicao,
                 livro.idioma,
@@ -1800,6 +1965,8 @@ class InterfaceExtrator:
             )
         if exigir_todas_validas:
             for indice, item in enumerate(self.itens_biblioteca):
+                if item.nao_e_tabuleiro is True:
+                    continue
                 valido, mensagem = validar_posicao(item.posicao, livro.idioma)
                 if not valido:
                     self.indice_biblioteca = indice
@@ -1833,7 +2000,8 @@ class InterfaceExtrator:
                 exigir_todas_validas=exigir_todas_validas,
                 exigir_atual_valida=exigir_atual_valida,
             )
-            self._atualizar_biblioteca()
+            if hasattr(self, "rotulo_pendencias_biblioteca"):
+                self._atualizar_acoes_validacao_biblioteca()
             self.estado_barra.set("Alterações salvas automaticamente")
             return True
         except ValueError as erro:
@@ -1847,15 +2015,21 @@ class InterfaceExtrator:
             if not silencioso:
                 messagebox.showerror("Não foi possível salvar", str(erro), parent=self.raiz)
             return False
+        finally:
+            if hasattr(self, "comparador_biblioteca"):
+                self.comparador_biblioteca.indicar_trabalho("")
 
     def _exportar_pgn_biblioteca(self) -> None:
         self._cancelar_salvamento_biblioteca_pendente()
         try:
-            livro = self._persistir_editor_biblioteca()
+            livro = self._persistir_editor_biblioteca(
+                exigir_todas_validas=False,
+                exigir_atual_valida=False,
+            )
         except (OSError, ValueError) as erro:
             messagebox.showerror("Nao foi possivel salvar", str(erro), parent=self.raiz)
             return
-        diagramas = [diagrama for diagrama in livro.diagramas if diagrama.posicao]
+        diagramas, omitidos = selecionar_diagramas_pgn(livro.diagramas, livro.idioma)
         if not diagramas:
             messagebox.showwarning(
                 "Nenhuma posicao valida",
@@ -1885,13 +2059,30 @@ class InterfaceExtrator:
         )
         if not destino:
             return
+        if Path(destino).suffix.lower() == ".pdf":
+            messagebox.showerror(
+                "Destino inválido",
+                "Escolha um arquivo com extensão .pgn. O PDF não será sobrescrito.",
+                parent=self.raiz,
+            )
+            return
         try:
-            self._persistir_editor_biblioteca()
+            livro = self._persistir_editor_biblioteca(
+                exigir_todas_validas=False,
+                exigir_atual_valida=False,
+            )
             exportar_pgn(destino, livro.titulo, diagramas, annotator, livro.idioma)
             self._atualizar_biblioteca()
             messagebox.showinfo(
                 "PGN exportado",
-                f"{len(diagramas)} posicao(oes) exportada(s) com sucesso.",
+                (
+                    f"{len(diagramas)} posição(ões) exportada(s) com sucesso."
+                    + (
+                        f"\nOmitidas por erro: {', '.join(map(str, omitidos))}."
+                        if omitidos
+                        else ""
+                    )
+                ),
                 parent=self.raiz,
             )
         except (OSError, ValueError) as erro:
@@ -1914,6 +2105,7 @@ class InterfaceExtrator:
         self.itens_biblioteca = []
         self._imagem_biblioteca_tk = None
         self.raiz.geometry(f"{LARGURA_JANELA}x{ALTURA_JANELA}")
+        self._atualizar_biblioteca()
         self._atualizar_estado_principal()
         self._ao_selecionar_livro()
 
@@ -2209,12 +2401,13 @@ class InterfaceExtrator:
                     arquivo_saida,
                     Path(entrada).stem,
                     [
-                        DiagramaSalvo(candidato.pagina, candidato.confianca)
+                        DiagramaSalvo(candidato.pagina, candidato.confianca, quadro_pdf=candidato.quadro_pdf)
                         for candidato in candidatos
                     ],
                     idioma=idioma,
                     paginas_originais=total_paginas,
                     livro_id=livro_id,
+                    pdf_original=entrada,
                 )
                 resultado = ResultadoExtracao(total_paginas, len(candidatos), arquivo_saida)
             self.eventos.put(("concluido", resultado))
@@ -2307,6 +2500,13 @@ class InterfaceExtrator:
 
             if self.cancelamento.is_set():
                 raise ExtracaoCancelada("A extração foi cancelada.")
+            # A revisão passa a usar um livro permanente, inclusive quando
+            # o usuário fecha a janela antes de exportar o PDF revisado.
+            salvo = self.biblioteca.salvar(
+                arquivo_extraido, Path(entrada).stem, diagramas_de_itens(candidatos, itens, idioma),
+                idioma=idioma, annotator=annotator, paginas_originais=total_paginas,
+                livro_id=livro_id, pdf_original=entrada)
+            livro_id = salvo.id
             self.eventos.put(
                 (
                     "revisao_pronta",
@@ -2346,7 +2546,7 @@ class InterfaceExtrator:
         self.estatistica_paginas.set(str(total_paginas))
         self.estatistica_diagramas.set(str(len(candidatos)))
         self.estatistica_atencao.set(
-            str(sum(not validar_posicao(item.posicao, idioma)[0] or bool(item.aviso) for item in itens))
+            str(resumir_diagramas(diagramas_de_itens(candidatos, itens, idioma), idioma)[2])
         )
         self.estatistica_excluidos.set(str(sum(item.nao_e_tabuleiro for item in itens)))
         self.estado_barra.set("Revisando diagramas")
@@ -2354,6 +2554,17 @@ class InterfaceExtrator:
         titulo_livro = dados[8] if len(dados) > 8 else Path(entrada).stem
         annotator_inicial = dados[9] if len(dados) > 9 else ""
         estado_annotator = {"valor": annotator_inicial}
+        self._atualizar_biblioteca()
+
+        def salvar_revisao(estados) -> None:
+            livro = self.biblioteca.salvar(
+                self.biblioteca._pasta_livro(livro_id) / "diagramas.pdf",
+                titulo_livro, diagramas_de_itens(candidatos, estados, idioma),
+                idioma=idioma, annotator=estado_annotator["valor"],
+                paginas_originais=total_paginas, livro_id=livro_id)
+            if self.lista_livros.exists(livro.id):
+                self.lista_livros.item(livro.id, values=(*resumir_diagramas(livro.diagramas, idioma),
+                    self._formatar_data_criacao(livro.criado_em)))
 
         def salvar_annotator(valor: str) -> None:
             estado_annotator["valor"] = valor
@@ -2407,6 +2618,7 @@ class InterfaceExtrator:
                     titulo_livro,
                     estado_annotator["valor"],
                     livro_id,
+                    diagramas_de_itens(candidatos, itens, idioma),
                 ),
                 daemon=True,
             ).start()
@@ -2414,6 +2626,7 @@ class InterfaceExtrator:
         def cancelar() -> None:
             self.janela_revisao = None
             self.revisando = False
+            self._atualizar_biblioteca()
             self._mostrar_progresso(0, "Visualização pausada.", "warning", estimar=False)
             self.ultimo_resultado = ResultadoExtracao(
                 total_paginas,
@@ -2423,7 +2636,7 @@ class InterfaceExtrator:
             self._alternar_controles(True)
             self._mostrar_acoes_resultado()
             self._definir_status(
-                "Visualização pausada. O PDF de extrações está salvo e o rascunho foi mantido.",
+                "Trabalho salvo na biblioteca. Reabra o livro para continuar a revisão.",
                 "warning",
             )
 
@@ -2442,6 +2655,7 @@ class InterfaceExtrator:
                 annotator=annotator_inicial,
                 titulo_livro=titulo_livro,
                 ao_salvar_annotator=salvar_annotator,
+                ao_salvar_revisao=salvar_revisao,
             )
         except Exception as erro:
             self.revisando = False
@@ -2458,6 +2672,7 @@ class InterfaceExtrator:
         titulo_livro: str,
         annotator: str,
         livro_id: str | None,
+        estados_salvos: list[DiagramaSalvo] | None = None,
     ) -> None:
         try:
             rascunho_anterior = caminho_rascunho(entrada, pasta_dados_aplicativo())
@@ -2468,15 +2683,18 @@ class InterfaceExtrator:
                 cancelado=self.cancelamento.is_set,
             )
             mantidas = [anotacao for anotacao in anotacoes if not anotacao.excluir]
-            confirmadas = sum(anotacao.posicao is not None for anotacao in mantidas)
+            diagramas_salvos = ([d for d in estados_salvos if d.excluir is not True] if estados_salvos is not None
+                               else diagramas_de_anotacoes(candidatos, anotacoes))
+            _total, confirmadas, pendentes = resumir_diagramas(diagramas_salvos, idioma)
             self.biblioteca.salvar(
                 arquivo_saida,
                 titulo_livro,
-                diagramas_de_anotacoes(candidatos, anotacoes),
+                diagramas_salvos,
                 idioma=idioma,
                 annotator=annotator,
                 paginas_originais=total_paginas,
                 livro_id=livro_id,
+                pdf_original=entrada,
             )
             rascunho_anterior.unlink(missing_ok=True)
             self.eventos.put(
@@ -2487,7 +2705,7 @@ class InterfaceExtrator:
                         len(mantidas),
                         arquivo_saida,
                         confirmadas,
-                        len(mantidas) - confirmadas,
+                        pendentes,
                     ),
                 )
             )
@@ -2566,6 +2784,8 @@ class InterfaceExtrator:
                     )
                 elif tipo == "atualizacao_baixada":
                     self._instalar_atualizacao(dados)  # type: ignore[arg-type]
+                elif tipo == "atualizacao_cancelada":
+                    self._cancelou_atualizacao()
         except queue.Empty:
             pass
         self.raiz.after(100, self._verificar_eventos)
@@ -2734,8 +2954,13 @@ class InterfaceExtrator:
         self.atualizacao_pendente = atualizacao
         self._definir_status(f"Nova versão disponível: v{atualizacao.versao}", "info")
         self.botao_instalar_atualizacao.grid()
+        self._atualizar_estado_principal()
 
     def _iniciar_atualizacao_pendente(self) -> None:
+        if self.baixando_atualizacao:
+            self.cancelamento_atualizacao.set()
+            self._definir_status("Cancelando download...", "info")
+            return
         atualizacao = self.atualizacao_pendente
         if atualizacao is None or self.atualizando:
             return
@@ -2743,9 +2968,11 @@ class InterfaceExtrator:
             self._definir_status("Conclua a extração antes de instalar a atualização.", "warning")
             return
         self.atualizando = True
-        self.atualizacao_pendente = None
+        self.baixando_atualizacao = True
+        self.cancelamento_atualizacao.clear()
+        self.verificacao_silenciosa = False
         self.botao_atualizar.configure(state="disabled")
-        self.botao_instalar_atualizacao.grid_remove()
+        self.botao_instalar_atualizacao.configure(text="Cancelar download")
         self._alternar_controles(False)
         self._definir_status(f"Baixando a versão {atualizacao.versao}...", "info")
         threading.Thread(target=self._baixar_atualizacao, args=(atualizacao,), daemon=True).start()
@@ -2755,8 +2982,11 @@ class InterfaceExtrator:
             caminho = baixar_atualizacao(
                 atualizacao,
                 progresso=lambda recebido, total: self.eventos.put(("download_atualizacao", (recebido, total))),
+                cancelado=self.cancelamento_atualizacao.is_set,
             )
             self.eventos.put(("atualizacao_baixada", caminho))
+        except AtualizacaoCancelada:
+            self.eventos.put(("atualizacao_cancelada", None))
         except Exception as erro:
             self.logger.warning("Falha ao baixar a atualização.", exc_info=True)
             self.eventos.put(("atualizacao_erro", erro))
@@ -2766,32 +2996,48 @@ class InterfaceExtrator:
         self.botao_atualizar.configure(state="normal")
         self._atualizar_estado_principal()
         if not self.verificacao_silenciosa:
-            self._definir_status(f"Você já usa a versão mais recente (v{__version__}).", "success")
+            self._definir_status(f"Nenhuma atualização disponível para v{__version__}.", "success")
 
-    def _erro_atualizacao(self, erro: object) -> None:
+    def _cancelou_atualizacao(self) -> None:
+        self.baixando_atualizacao = False
         self.atualizando = False
         self.botao_atualizar.configure(state="normal")
+        self.botao_instalar_atualizacao.configure(text="Instalar atualização")
         self._alternar_controles(True)
+        self.progresso["value"] = 0
+        self._definir_status("Download cancelado. Você pode tentar novamente.", "info")
+
+    def _erro_atualizacao(self, erro: object) -> None:
+        era_download = getattr(self, "baixando_atualizacao", False)
+        self.baixando_atualizacao = False
+        self.atualizando = False
+        self.botao_atualizar.configure(state="normal")
+        if era_download:
+            self._alternar_controles(True)
+            self.botao_instalar_atualizacao.configure(text="Tentar atualização novamente")
+            self.botao_instalar_atualizacao.grid()
+        else:
+            self._atualizar_estado_principal()
         if not self.verificacao_silenciosa:
-            self._definir_status("Não foi possível verificar atualizações.", "warning")
+            self._definir_status("Falha no download da atualização." if era_download else "Não foi possível verificar atualizações.", "warning")
             messagebox.showerror(
                 "Erro de atualização",
-                "Não foi possível verificar atualizações. Confira sua conexão e tente novamente.",
+                str(erro),
                 parent=self.raiz,
             )
 
     def _instalar_atualizacao(self, caminho: Path) -> None:
+        cancelamento = getattr(self, "cancelamento_atualizacao", None)
+        if cancelamento is not None and cancelamento.is_set():
+            self._cancelou_atualizacao()
+            return
         try:
             iniciar_instalador(caminho)
         except Exception as erro:
             self.logger.exception("Falha ao iniciar o instalador da atualização.")
             self._erro_atualizacao(erro)
             return
-        messagebox.showinfo(
-            "Atualização iniciada",
-            "O aplicativo será fechado e o instalador concluirá a atualização.",
-            parent=self.raiz,
-        )
+        self.estado_barra.set("Fechando para atualizar. O aplicativo reabrirá automaticamente.")
         self.raiz.after(300, self.raiz.destroy)
 
     def _desinstalar(self) -> None:
@@ -2838,4 +3084,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        from verificacao_distribuicao import executar_cli
+        sys.exit(executar_cli(sys.argv[1:]))
     main()

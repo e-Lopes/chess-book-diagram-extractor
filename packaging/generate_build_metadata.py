@@ -23,6 +23,8 @@ def validar_versao(valor: str) -> tuple[int, int, int, int]:
 
 def gerar(versao: str, repositorio: str = "", editor: str = "E-Lopes") -> None:
     arquivo_versao = validar_versao(versao)
+    if repositorio and not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repositorio):
+        raise ValueError("Repositório GitHub inválido.")
     DESTINO.mkdir(parents=True, exist_ok=True)
     (DESTINO / "_build_config.py").write_text(
         f"BUILD_VERSION = {versao!r}\nGITHUB_REPOSITORY = {repositorio!r}\nPUBLISHER = {editor!r}\n",
@@ -36,7 +38,7 @@ VSVersionInfo(
   ),
   kids=[
     StringFileInfo([StringTable(u'041604B0', [
-      StringStruct(u'CompanyName', u'{editor}'),
+      StringStruct(u'CompanyName', {editor!r}),
       StringStruct(u'FileDescription', u'Chess Book Diagram Extractor'),
       StringStruct(u'FileVersion', u'{versao}'),
       StringStruct(u'InternalName', u'ChessBookDiagramExtractor'),

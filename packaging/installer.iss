@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.3.0"
+  #define MyAppVersion "0.4.1"
 #endif
 #ifndef MyAppPublisher
   #define MyAppPublisher "E-Lopes"
@@ -10,6 +10,9 @@
 
 #define MyAppName "Chess Book Diagram Extractor"
 #define MyAppExeName "ChessBookDiagramExtractor.exe"
+#ifndef MyAppSource
+  #define MyAppSource "..\dist\ChessBookDiagramExtractor"
+#endif
 
 [Setup]
 AppId={{8DE9497B-8ED6-4458-95C7-174C7F08A611}
@@ -49,7 +52,7 @@ Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortugue
 Name: "desktopicon"; Description: "Criar um atalho na área de trabalho"; GroupDescription: "Atalhos adicionais:"; Flags: unchecked
 
 [Files]
-Source: "..\dist\ChessBookDiagramExtractor\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MyAppSource}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [InstallDelete]
 Type: files; Name: "{app}\DiagramExtractor.exe"
@@ -63,3 +66,10 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Abrir {#MyAppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait skipifnotsilent; Check: ReopenAfterUpdate
+
+[Code]
+function ReopenAfterUpdate(): Boolean;
+begin
+  Result := ExpandConstant('{param:REOPENAPP|0}') = '1';
+end;

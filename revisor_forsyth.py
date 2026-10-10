@@ -14,6 +14,10 @@ from PIL import Image, ImageTk
 
 from extrair_tabuleiros_pdf import AnotacaoSaida, Candidato
 from biblioteca_livros import DiagramaSalvo, exportar_pgn
+from exportacao_padronizada_ui import exportar_livro_padronizado
+from visualizacao_diagramas import ComparadorDiagramas
+from reconhecimento_ui import reavaliar_imagem
+from revisao_assincrona import RevisaoAssincrona
 from notacao_forsyth import (
     ItemRevisao,
     RevisorAutomaticoLivro,
@@ -21,9 +25,11 @@ from notacao_forsyth import (
     aviso_plausibilidade,
     caminho_recurso,
     carregar_rascunho,
+    formatar_posicao_lado,
     normalizar_posicao,
     remover_rascunho,
     salvar_rascunho,
+    separar_posicao_lado,
     validar_posicao,
 )
 
@@ -49,6 +55,7 @@ class JanelaRevisaoForsyth:
         titulo_livro: str = "Livro de xadrez",
         ao_salvar_annotator: Callable[[str], None] | None = None,
         modo_biblioteca: bool = False,
+        ao_salvar_revisao: Callable[[list[ItemRevisao]], None] | None = None,
     ) -> None:
         if not candidatos or len(candidatos) != len(itens):
             raise ValueError("A revisão exige um estado para cada diagrama.")
@@ -66,6 +73,7 @@ class JanelaRevisaoForsyth:
         self.titulo_livro = titulo_livro
         self.ao_salvar_annotator = ao_salvar_annotator
         self.modo_biblioteca = modo_biblioteca
+        self.ao_salvar_revisao = ao_salvar_revisao
         self.indice = 0
         self._fechando = False
         self._imagem_tk: ImageTk.PhotoImage | None = None
@@ -93,6 +101,9 @@ class JanelaRevisaoForsyth:
                 pass
 
         self._montar()
+        self._revisao_assincrona = RevisaoAssincrona(
+            self.janela, self.comparador.indicar_trabalho,
+            self._aplicar_revisao_assincrona, self._erro_revisao_assincrona)
         self._restaurar_rascunho()
         self._exibir_atual()
         self.janela.after_idle(self._centralizar)
@@ -108,8 +119,8 @@ class JanelaRevisaoForsyth:
     def _montar(self) -> None:
         principal = ttk.Frame(self.janela, padding=20)
         principal.pack(fill="both", expand=True)
-        principal.columnconfigure(0, weight=3)
-        principal.columnconfigure(1, weight=2)
+        principal.columnconfigure(0, weight=4)
+        principal.columnconfigure(1, weight=1, minsize=280)
         principal.rowconfigure(1, weight=1)
 
         cabecalho = ttk.Frame(principal)
@@ -124,9 +135,17 @@ class JanelaRevisaoForsyth:
         self.quadro_imagem = ttk.Frame(principal, padding=12, bootstyle="@card")
         self.quadro_imagem.grid(row=1, column=0, sticky="nsew", padx=(0, 14))
         self.quadro_imagem.columnconfigure(0, weight=1)
-        self.quadro_imagem.rowconfigure(0, weight=1)
-        self.rotulo_imagem = ttk.Label(self.quadro_imagem, anchor="center")
-        self.rotulo_imagem.grid(row=0, column=0, sticky="nsew")
+        self.quadro_imagem.rowconfigure(1, weight=1)
+        self.modo_imagem = tk.StringVar(master=self.janela, value="comparar")
+        modos_imagem = ttk.Frame(self.quadro_imagem)
+        modos_imagem.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        for valor, texto in (("comparar", "Lado a lado"), ("original", "Original"), ("padronizado", "Padronizado")):
+            ttk.Radiobutton(modos_imagem, text=texto, value=valor,
+                variable=self.modo_imagem, command=self._atualizar_imagem,
+                bootstyle="primary toolbutton", padding=(10, 6)).pack(side="left", padx=(0, 6))
+        self.comparador = ComparadorDiagramas(self.quadro_imagem, ao_editar=self._editar_pelo_tabuleiro)
+        self.comparador.grid(row=1, column=0, sticky="nsew")
+        self.rotulo_imagem = self.comparador.rotulos["original"]
         self.quadro_imagem.bind("<Configure>", self._ao_redimensionar_imagem)
 
         painel = ttk.Frame(principal, padding=18, bootstyle="@card")
@@ -139,32 +158,25 @@ class JanelaRevisaoForsyth:
         ttk.Label(
             painel,
             text=(
-                "Confira as sugestões e marque somente os recortes que não são "
-                "tabuleiros. A revisão das posições será feita depois."
+                "Clique em uma casa do tabuleiro reconstruído para trocar a peça "
+                "ou deixá-la vazia. A Forsyth abaixo acompanha as alterações."
             ),
             bootstyle="secondary",
-            wraplength=360,
+            wraplength=270,
         ).grid(row=1, column=0, sticky="w", pady=(3, 18))
 
-        ttk.Label(painel, text="Sugestão Forsyth", style="FieldLabel.TLabel").grid(
-            row=2, column=0, sticky="w"
-        )
-        self.campo_posicao = tk.Text(
-            painel,
-            width=46,
-            height=4,
-            wrap="char",
-            font=("Consolas", 12),
-            relief="solid",
-            borderwidth=1,
-            padx=9,
-            pady=8,
-            undo=True,
-        )
-        self.campo_posicao.grid(row=3, column=0, sticky="ew", pady=(6, 8))
+        linha_forsyth = ttk.Frame(self.quadro_imagem)
+        linha_forsyth.grid(row=2, column=0, sticky="ew", pady=(10, 4))
+        ttk.Label(linha_forsyth, text="Forsyth completa", style="FieldLabel.TLabel").pack(side="left")
+        ttk.Button(linha_forsyth, text="Copiar", command=self._copiar_posicao,
+                   bootstyle="secondary link").pack(side="right")
+        self.campo_posicao = tk.Text(self.quadro_imagem, width=1, height=2,
+            wrap="char", font=("Consolas", 11), relief="solid", borderwidth=1,
+            padx=9, pady=8, undo=True)
+        self.campo_posicao.grid(row=3, column=0, sticky="ew")
         self.campo_posicao.bind("<KeyRelease>", self._validar_digitacao)
 
-        self.rotulo_validacao = ttk.Label(painel, wraplength=360, justify="left")
+        self.rotulo_validacao = ttk.Label(painel, wraplength=270, justify="left")
         self.rotulo_validacao.grid(row=4, column=0, sticky="ew")
 
         self.rotulo_lado = ttk.Label(painel, text="Lado a jogar", style="FieldLabel.TLabel")
@@ -173,25 +185,17 @@ class JanelaRevisaoForsyth:
         )
         self.quadro_lados = ttk.Frame(painel)
         self.quadro_lados.grid(row=6, column=0, sticky="w")
-        ttk.Radiobutton(
-            self.quadro_lados,
-            text="White to Move",
-            variable=self.variavel_lado,
-            value="w",
-            command=self._alterar_lado,
-            bootstyle="primary",
-        ).pack(side="left")
-        ttk.Radiobutton(
-            self.quadro_lados,
-            text="Black to Move",
-            variable=self.variavel_lado,
-            value="b",
-            command=self._alterar_lado,
-            bootstyle="primary",
-        ).pack(side="left", padx=(14, 0))
+        self.botao_white = ttk.Radiobutton(self.quadro_lados, text="Brancas",
+            variable=self.variavel_lado, value="w", command=lambda: self._alterar_lado("w"),
+            bootstyle="primary toolbutton", padding=(14, 8))
+        self.botao_white.pack(side="left")
+        self.botao_black = ttk.Radiobutton(self.quadro_lados, text="Pretas",
+            variable=self.variavel_lado, value="b", command=lambda: self._alterar_lado("b"),
+            bootstyle="primary toolbutton", padding=(14, 8))
+        self.botao_black.pack(side="left", padx=(6, 0))
 
         self.rotulo_annotator = ttk.Label(
-            painel, text="Annotator", style="FieldLabel.TLabel"
+            painel, text="Responsável pelas anotações", style="FieldLabel.TLabel"
         )
         self.rotulo_annotator.grid(
             row=7, column=0, sticky="w", pady=(14, 4)
@@ -201,7 +205,7 @@ class JanelaRevisaoForsyth:
 
         self.checkbox_excluir = ttk.Checkbutton(
             painel,
-            text="Não é um tabuleiro/diagrama — excluir do PDF final",
+            text="Descartar este recorte",
             variable=self.variavel_excluir,
             command=self._alterar_exclusao,
             bootstyle="danger",
@@ -219,11 +223,15 @@ class JanelaRevisaoForsyth:
                 + " para as peças brancas e letras minúsculas para as pretas. "
                 "Leia cada linha da esquerda para a direita, de cima para baixo."
             ),
-            wraplength=360,
+            wraplength=270,
             justify="left",
             bootstyle="secondary",
         )
         self.rotulo_ajuda.grid(row=10, column=0, sticky="sw", pady=(18, 0))
+        ttk.Button(painel, text="Reavaliar imagem", command=self._reavaliar_imagem,
+                   bootstyle="secondary outline").grid(row=11, column=0, sticky="ew", pady=(12, 0))
+        ttk.Button(painel, text="Confirmar diagrama conferido", command=self._confirmar_diagrama,
+                   bootstyle="success outline").grid(row=12, column=0, sticky="ew", pady=(8, 0))
 
         navegacao = ttk.Frame(principal)
         navegacao.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(16, 0))
@@ -272,16 +280,77 @@ class JanelaRevisaoForsyth:
             bootstyle="success outline",
         )
         self.botao_exportar_pgn.grid(row=0, column=2, sticky="e", padx=(8, 0))
-        if not self.modo_biblioteca:
-            self.rotulo_lado.grid_remove()
-            self.quadro_lados.grid_remove()
-            self.rotulo_annotator.grid_remove()
-            self.campo_annotator.grid_remove()
-            self.botao_exportar_pgn.grid_remove()
-            self.checkbox_excluir.grid_configure(row=5)
-            self.rotulo_ajuda.grid_configure(row=6)
-            painel.rowconfigure(10, weight=0)
-            painel.rowconfigure(6, weight=1)
+        ttk.Button(navegacao, text="Exportar livro padronizado",
+            command=self._exportar_pdf_padronizado, bootstyle="primary outline"
+        ).grid(row=1, column=0, columnspan=3, sticky="e", pady=(10, 0))
+
+    def _editar_pelo_tabuleiro(self, texto: str) -> None:
+        self._definir_campo(texto)
+        self.itens[self.indice].editada_manualmente = True
+        self._salvar_atual(confirmar=False)
+        self._validar_digitacao()
+        self._atualizar_imagem()
+
+    def _confirmar_diagrama(self) -> None:
+        if self._salvar_atual(confirmar=True):
+            item = self.itens[self.indice]
+            item.editada_manualmente = True
+            item.revisao_necessaria = False
+            self._salvar_rascunho()
+            self._validar_digitacao()
+
+    def _aplicar_revisao_assincrona(self, anteriores, revisados) -> None:
+        atual = self.itens[self.indice]
+        campo = separar_posicao_lado(self._texto_campo(), atual.lado_a_jogar)[0]
+        mudou_atual = False
+        for indice, (item, anterior, revisado) in enumerate(zip(self.itens, anteriores, revisados)):
+            if item.editada_manualmente or item.nao_e_tabuleiro or item.posicao != anterior:
+                continue
+            # Digitação ainda não salva também precisa ser preservada.
+            if indice == self.indice and campo != anterior:
+                continue
+            for atributo in ("posicao", "aviso", "alteracoes_automaticas", "duvidas_automaticas", "confiavel", "revisao_necessaria"):
+                setattr(item, atributo, getattr(revisado, atributo))
+            mudou_atual |= indice == self.indice
+        self._salvar_rascunho()
+        if mudou_atual:
+            self._exibir_atual()
+
+    def _erro_revisao_assincrona(self, erro) -> None:
+        self.logger.error("Falha ao revisar o livro em segundo plano: %s", erro,
+                          exc_info=(type(erro), erro, erro.__traceback__))
+        self.rotulo_validacao.configure(text="Correção salva. Não foi possível atualizar o reconhecimento do livro.",
+                                        bootstyle="warning")
+
+    def _aguardar_revisao(self, callback) -> bool:
+        tarefa = getattr(self, "_revisao_assincrona", None)
+        return tarefa is None or tarefa.quando_pronto(callback)
+
+    def _reavaliar_imagem(self) -> None:
+        self._salvar_atual(confirmar=False)
+        indice = self.indice
+        anterior = self.itens[indice]
+        def aplicar(resultado):
+            novo = ItemRevisao.de_reconhecimento(resultado)
+            novo.lado_a_jogar, novo.nao_e_tabuleiro = anterior.lado_a_jogar, anterior.nao_e_tabuleiro
+            self.itens[indice] = novo
+            if self.revisor_automatico is not None:
+                self.revisor_automatico.substituir_resultado(indice, resultado)
+                self._revisao_assincrona.agendar(self.revisor_automatico, self.itens)
+            self._salvar_rascunho()
+            self._exibir_atual()
+        reavaliar_imagem(self.janela, self.candidatos[indice].imagem, self.idioma, aplicar)
+
+    def _copiar_posicao(self) -> None:
+        self.janela.clipboard_clear()
+        self.janela.clipboard_append(self._texto_campo())
+
+    def _exportar_pdf_padronizado(self) -> None:
+        self._salvar_atual(confirmar=False)
+        if not self._aguardar_revisao(self._exportar_pdf_padronizado):
+            return
+        exportar_livro_padronizado(self.janela, self.caminho_pdf, self.candidatos,
+                                  self.itens, self.idioma, self.titulo_livro)
 
     def _restaurar_rascunho(self) -> None:
         dados = carregar_rascunho(
@@ -303,7 +372,7 @@ class JanelaRevisaoForsyth:
             remover_rascunho(self.caminho_pdf, self.pasta_dados)
 
     def _texto_campo(self) -> str:
-        return self.campo_posicao.get("1.0", "end-1c").strip().replace("\n", "")
+        return " ".join(self.campo_posicao.get("1.0", "end-1c").split())
 
     def _definir_campo(self, texto: str) -> None:
         self.campo_posicao.delete("1.0", "end")
@@ -312,17 +381,24 @@ class JanelaRevisaoForsyth:
     def _salvar_rascunho(self) -> None:
         try:
             salvar_rascunho(self.caminho_pdf, self.itens, self.pasta_dados, self.idioma)
+            callback = getattr(self, "ao_salvar_revisao", None)
+            if callback is not None:
+                callback(self.itens)
         except OSError:
             self.logger.warning("Não foi possível salvar o rascunho Forsyth.", exc_info=True)
 
     def _salvar_atual(self, confirmar: bool) -> bool:
         item = self.itens[self.indice]
         texto_anterior = item.posicao
-        texto = self._texto_campo()
+        variavel_lado = getattr(self, "variavel_lado", None)
+        lado_atual = variavel_lado.get() if variavel_lado is not None else item.lado_a_jogar
+        texto, lado = separar_posicao_lado(self._texto_campo(), lado_atual)
+        if variavel_lado is not None:
+            variavel_lado.set(lado)
         valido, _mensagem = validar_posicao(texto, self.idioma)
         if valido:
             texto = normalizar_posicao(texto, self.idioma)
-            self._definir_campo(texto)
+            self._definir_campo(formatar_posicao_lado(texto, lado))
         item.posicao = texto
         # Campo legado mantido no rascunho; agora significa apenas que a
         # notação possui sintaxe válida, sem exigir confirmação manual.
@@ -330,10 +406,9 @@ class JanelaRevisaoForsyth:
         variavel_excluir = getattr(self, "variavel_excluir", None)
         if variavel_excluir is not None:
             item.nao_e_tabuleiro = bool(variavel_excluir.get())
-        variavel_lado = getattr(self, "variavel_lado", None)
+        item.lado_a_jogar = lado
         if variavel_lado is not None:
-            lado = variavel_lado.get()
-            item.lado_a_jogar = lado if lado in ("w", "b") else "w"
+            self._atualizar_badges_lado()
         if (
             valido
             and texto != texto_anterior
@@ -347,8 +422,10 @@ class JanelaRevisaoForsyth:
                 texto_anterior,
                 texto,
             )
-            self.revisor_automatico.revisar_itens(self.itens)
+            self._revisao_assincrona.agendar(self.revisor_automatico, self.itens)
         if valido:
+            if texto != texto_anterior:
+                item.editada_manualmente = True
             item.posicao_original = texto
         self._salvar_rascunho()
         return valido
@@ -358,12 +435,30 @@ class JanelaRevisaoForsyth:
         item.nao_e_tabuleiro = bool(self.variavel_excluir.get())
         if self.revisor_automatico is not None:
             self.revisor_automatico.definir_exclusao(self.indice, item.nao_e_tabuleiro)
+            self._revisao_assincrona.agendar(self.revisor_automatico, self.itens)
         self._salvar_rascunho()
         self._validar_digitacao()
 
-    def _alterar_lado(self) -> None:
-        lado = self.variavel_lado.get()
-        self.itens[self.indice].lado_a_jogar = lado if lado in ("w", "b") else "w"
+    def _atualizar_badges_lado(self) -> None:
+        # Os Radiobuttons acompanham a variável sem mudar bordas ou dimensões.
+        if hasattr(self, "botao_white"):
+            self.botao_white.configure(bootstyle="primary toolbutton")
+            self.botao_black.configure(bootstyle="primary toolbutton")
+
+    def _alterar_lado(self, lado: str | None = None) -> None:
+        lado = lado if lado in ("w", "b") else self.variavel_lado.get()
+        lado = lado if lado in ("w", "b") else "w"
+        self.variavel_lado.set(lado)
+        item = self.itens[self.indice]
+        posicao = item.posicao
+        if hasattr(self, "campo_posicao"):
+            posicao, _lado_anterior = separar_posicao_lado(
+                self._texto_campo(), item.lado_a_jogar
+            )
+        item.lado_a_jogar = lado
+        if hasattr(self, "campo_posicao"):
+            self._definir_campo(formatar_posicao_lado(posicao, lado))
+        self._atualizar_badges_lado()
         self._salvar_rascunho()
 
     def _navegar(self, deslocamento: int) -> None:
@@ -376,26 +471,40 @@ class JanelaRevisaoForsyth:
             self.indice = novo
             self._exibir_atual()
 
+    @staticmethod
+    def _aviso_ensemble(item: ItemRevisao) -> str:
+        if item.editada_manualmente:
+            return ""
+        if item.ajustes_reis:
+            return "Reis ajustados pela confiança. Confira: " + ", ".join(item.ajustes_reis) + "."
+        divergentes = [c.coordenada for c in item.casas if c.divergencia_modelos and not c.marcador_vazio]
+        if not divergentes:
+            return ""
+        lista = ", ".join(divergentes[:8])
+        restante = f" e mais {len(divergentes) - 8}" if len(divergentes) > 8 else ""
+        return f"Confira {len(divergentes)} casa(s) com reconhecimento incerto: {lista}{restante}."
+
     def _validar_digitacao(self, _evento: object | None = None) -> None:
+        if hasattr(self, "modo_imagem") and self.modo_imagem.get() in ("comparar", "padronizado"):
+            self._ao_redimensionar_imagem()
         if self.variavel_excluir.get():
             self.rotulo_validacao.configure(
                 text="Este recorte será excluído do PDF final e da lista de notações.",
                 bootstyle="danger",
             )
             return
-        if not getattr(self, "modo_biblioteca", False):
-            self.rotulo_validacao.configure(
-                text=(
-                    "Sugestão automática. A posição poderá ser revisada depois, "
-                    "diagrama por diagrama."
-                ),
-                bootstyle="secondary",
-            )
-            return
-        texto = self._texto_campo()
+        texto, lado = separar_posicao_lado(
+            self._texto_campo(), self.itens[self.indice].lado_a_jogar
+        )
+        if lado != self.variavel_lado.get():
+            self.variavel_lado.set(lado)
+            self._atualizar_badges_lado()
         valido, mensagem = validar_posicao(texto, self.idioma)
         if valido:
-            aviso = aviso_plausibilidade(texto, self.idioma)
+            aviso = aviso_plausibilidade(texto, self.idioma) or self._aviso_ensemble(self.itens[self.indice])
+            item = self.itens[self.indice]
+            if item.revisao_necessaria and not item.editada_manualmente:
+                aviso = aviso or "Reconhecimento incerto. Confira as peças e confirme ou corrija o diagrama."
             if aviso:
                 self.rotulo_validacao.configure(text=aviso, bootstyle="warning")
             else:
@@ -404,20 +513,8 @@ class JanelaRevisaoForsyth:
             self.rotulo_validacao.configure(text=mensagem, bootstyle="danger")
 
     def _atualizar_imagem(self) -> None:
-        candidato = self.candidatos[self.indice]
-        item = self.itens[self.indice]
-        imagem = candidato.imagem
-        if imagem.ndim == 3:
-            imagem = cv2.cvtColor(imagem, cv2.COLOR_BGR2RGB)
-        pil = Image.fromarray(imagem)
-        largura_disponivel = max(220, self.quadro_imagem.winfo_width() - 28)
-        altura_disponivel = max(220, self.quadro_imagem.winfo_height() - 28)
-        pil.thumbnail(
-            (min(600, largura_disponivel), min(570, altura_disponivel)),
-            Image.Resampling.LANCZOS,
-        )
-        self._imagem_tk = ImageTk.PhotoImage(pil)
-        self.rotulo_imagem.configure(image=self._imagem_tk)
+        self.comparador.exibir(self.candidatos[self.indice].imagem, self._texto_campo(),
+                              self.idioma, self.modo_imagem.get())
 
     def _ao_redimensionar_imagem(self, _evento: object | None = None) -> None:
         if self._redimensionamento_pendente is not None:
@@ -438,24 +535,19 @@ class JanelaRevisaoForsyth:
         item = self.itens[self.indice]
         self.rotulo_contador.configure(text=f"Diagrama {self.indice + 1} de {len(self.itens)}")
         self.rotulo_origem.configure(text=f"Página original: {candidato.pagina}")
-        self._definir_campo(item.posicao)
+        self._definir_campo(formatar_posicao_lado(item.posicao, item.lado_a_jogar))
         self.variavel_excluir.set(item.nao_e_tabuleiro)
         self.variavel_lado.set(item.lado_a_jogar if item.lado_a_jogar in ("w", "b") else "w")
+        self._atualizar_badges_lado()
         self._atualizar_imagem()
         if item.nao_e_tabuleiro:
             estado = "Este recorte será excluído do PDF final e da lista de notações."
             estilo = "danger"
-        elif not getattr(self, "modo_biblioteca", False):
-            estado = (
-                "Sugestão automática. Nesta etapa, marque apenas os recortes que "
-                "não são tabuleiros."
-            )
-            estilo = "secondary"
         elif not validar_posicao(item.posicao, self.idioma)[0]:
             estado = item.aviso or "Posição vazia ou com sintaxe inválida."
             estilo = "warning" if item.aviso else "danger"
         else:
-            aviso = aviso_plausibilidade(item.posicao, self.idioma)
+            aviso = aviso_plausibilidade(item.posicao, self.idioma) or self._aviso_ensemble(item)
             estado = aviso
             estilo = "warning" if aviso else "secondary"
         self.rotulo_validacao.configure(text=estado, bootstyle=estilo)
@@ -466,9 +558,12 @@ class JanelaRevisaoForsyth:
             state="normal" if self.indice < len(self.itens) - 1 else "disabled"
         )
         self.campo_posicao.focus_set()
+        self._validar_digitacao()
 
     def _concluir(self) -> None:
         self._salvar_atual(confirmar=True)
+        if not self._aguardar_revisao(self._concluir):
+            return
         if getattr(self, "modo_biblioteca", False):
             for indice, item in enumerate(self.itens):
                 if item.nao_e_tabuleiro:
@@ -510,6 +605,8 @@ class JanelaRevisaoForsyth:
         if ao_salvar_annotator is not None:
             ao_salvar_annotator(annotator)
         self._fechando = True
+        if hasattr(self, "_revisao_assincrona"):
+            self._revisao_assincrona.fechar()
         self._cancelar_redimensionamento()
         self.janela.grab_release()
         self.janela.destroy()
@@ -535,6 +632,8 @@ class JanelaRevisaoForsyth:
 
     def _exportar_pgn(self) -> None:
         self._salvar_atual(confirmar=True)
+        if not self._aguardar_revisao(self._exportar_pgn):
+            return
         diagramas = self._diagramas_para_pgn()
         if not diagramas:
             messagebox.showwarning(
@@ -569,13 +668,31 @@ class JanelaRevisaoForsyth:
         )
         if not destino:
             return
+        if Path(destino).suffix.lower() == ".pdf":
+            messagebox.showerror(
+                "Destino inválido",
+                "Escolha um arquivo com extensão .pgn. O PDF não será sobrescrito.",
+                parent=self.janela,
+            )
+            return
         try:
             exportar_pgn(destino, self.titulo_livro, diagramas, annotator, self.idioma)
             if self.ao_salvar_annotator is not None:
                 self.ao_salvar_annotator(annotator)
             messagebox.showinfo(
                 "PGN exportado",
-                f"{len(diagramas)} posicao(oes) exportada(s) com sucesso.",
+                (
+                    f"{len(diagramas)} posição(ões) exportada(s) com sucesso."
+                    + (
+                        f"\n{sum(not validar_posicao(item.posicao, self.idioma)[0] for item in self.itens if not item.nao_e_tabuleiro)} posição(ões) inválida(s) foram omitidas."
+                        if any(
+                            not validar_posicao(item.posicao, self.idioma)[0]
+                            for item in self.itens
+                            if not item.nao_e_tabuleiro
+                        )
+                        else ""
+                    )
+                ),
                 parent=self.janela,
             )
         except (OSError, ValueError) as erro:
@@ -599,6 +716,8 @@ class JanelaRevisaoForsyth:
                 variavel_annotator.get().strip() if variavel_annotator is not None else ""
             )
         self._fechando = True
+        if hasattr(self, "_revisao_assincrona"):
+            self._revisao_assincrona.fechar()
         self._cancelar_redimensionamento()
         self.janela.grab_release()
         self.janela.destroy()

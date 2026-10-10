@@ -26,17 +26,18 @@ de um detector treinado.
 segundo modelo. Os limiares são testáveis e ajustáveis, mas digitalizações fora
 do padrão podem exigir novas heurísticas.
 
-## Priorizar recuperação de diagramas
+## Exigir evidência da grade na extração normal
 
 **Contexto:** em um livro de problemas, faltar um exercício é pior que incluir
 um candidato extra que o usuário consiga excluir.
 
-**Decisão:** aceitar confiança moderada e usar uma recuperação mais sensível
-somente quando o próprio livro demonstra um padrão alternado confiável.
+**Decisão:** usar a forma quadrada para gerar candidatos e exigir evidência
+de alternância 8×8 para aceitá-los. `aceitar_quadrados=True` fica disponível
+apenas para diagnóstico por código.
 
-**Consequência:** aumenta a cobertura sem liberar o limiar em todas as páginas.
-Ainda pode haver falsos positivos, tratados pela marcação “Não é um
-tabuleiro/diagrama”.
+**Consequência:** fotos, mapas, letras e texto quadrado deixam de passar só
+pelo formato. Diagramas degradados podem exigir inspeção adicional; recortes
+aceitos por engano ainda podem ser descartados manualmente.
 
 ## Gerar o PDF de extrações antes da notação
 
@@ -61,6 +62,24 @@ antes da inferência.
 **Consequência:** todos usam o mesmo modelo e uma alteração acidental é detectada.
 Atualizar o modelo exige uma decisão explícita, novos testes e atualização dos
 avisos de licença.
+
+## Ensemble de três classificadores locais
+
+**Contexto:** redes treinadas com estilos diferentes podem oferecer hipóteses
+complementares para uma mesma casa. Probabilidades altas também podem estar
+erradas em estilos fora do treinamento.
+
+**Decisão:** combinar fenshot, Linrock e TensorFlow Chessbot em ONNX com os
+pesos iniciais 60/30/10, preservando o preparo específico de cada rede. Registrar
+as previsões individuais e sinalizar divergências fortes. Todas as casas usam
+a mesma hipótese de recorte antes da combinação.
+
+**Consequência:** o instalador inclui aproximadamente 17,5 MB adicionais de
+pesos e o reconhecimento faz mais inferências. A avaliação atual preserva
+5/5 posições exatas; não demonstra ganho sobre o fenshot isolado. Os pesos e
+temperaturas ainda precisam de calibração em livros reais. Casos disputados
+não alimentam referências automáticas. Fontes, licenças e protocolo estão em
+[Ensemble](ENSEMBLE.md).
 
 ## Não usar uma VLM
 
@@ -143,6 +162,46 @@ fila e cancelar por evento verificado em pontos seguros.
 finalizados ou removidos corretamente. O cancelamento pode levar alguns
 instantes se uma operação nativa indivisível estiver em andamento.
 
+## Edição imediata e revisão do livro em segundo plano
+
+**Contexto:** revisar todos os diagramas antes de repintar uma casa tornava
+trocas de peças e vazio lentas em livros grandes.
+
+**Decisão:** reutilizar imagens das casas, agrupar edições próximas e revisar
+cópias dos estados fora da thread visual. Aplicar apenas resultados atuais,
+preservando intervenções manuais e mostrando progresso discreto.
+
+**Consequência:** editar não espera a revisão completa; exportar aguarda a
+última revisão sem bloquear a interface. A montagem da prévia medida localmente
+caiu de 44,45 ms para 0,90 ms. Essa medição cobre a montagem da imagem, não o
+tempo total de clique, validação, gravação ou exportação.
+
+## Salvar antes da revisão e tornar pendências visíveis
+
+**Contexto:** fechar a revisão inicial deixava o livro fora da biblioteca,
+apesar de existir um PDF extraído e um rascunho.
+
+**Decisão:** persistir o livro assim que o reconhecimento termina e salvar
+correções também nos metadados da biblioteca. Contar posições inválidas e
+reconhecimentos incertos em **Ajustar / conferir**, oferecendo confirmação manual.
+
+**Consequência:** o usuário retoma pela biblioteca sem processar novamente.
+**OK** significa validação e confiança ou conferência manual; não é garantia
+de correção de toda peça. Recortes descartados não entram nessas contagens.
+
+## Separar bolinhas de peças
+
+**Contexto:** oito diagramas de referência tinham 40 casas vazias marcadas
+com pontos que os modelos confundiam com peças.
+
+**Decisão:** identificar apenas componentes pequenos, isolados e circulares,
+tratá-los como vazio na eleição e preservá-los na revisão automática. Manter
+os votos originais para diagnóstico.
+
+**Consequência:** a avaliação da v0.4.1 passou a 341/341 posições exatas no
+subconjunto tipográfico. Isso não representa acurácia medida em todo o livro
+nem comprova vantagem do ensemble sobre modelos individuais reavaliados.
+
 ## Escrita atômica
 
 **Contexto:** fechar o aplicativo, cancelar ou ficar sem espaço durante uma
@@ -178,3 +237,38 @@ validar nome, URL, tamanho e digest antes de iniciar o instalador.
 SHA-256 garante integridade, enquanto a confiança do editor no Windows depende
 separadamente da assinatura Authenticode.
 
+## Substituição dos diagramas em uma cópia do livro
+
+**Contexto:** uma posição revisada permite reconstruir um tabuleiro limpo sem
+alterar o texto e o restante da página do livro.
+
+**Decisão:** guardar o PDF original e os cantos detectados em pontos PDF na
+biblioteca; desenhar com as peças clássicas Cburnett em SVG e sobrepor o tabuleiro na cópia do
+livro. Uma homografia respeita os cantos e um clipping vetorial restringe a
+imagem ao quadrilátero. A página inteira não é rasterizada nem redigida.
+
+**Validação:** testes com rotação 0/90/180/270, CropBox, caixas inclinadas,
+preservação de texto, links e pixels externos, gravação atômica e cancelamento.
+No livro de 601 páginas, uma amostra substituiu 341 diagramas com referência
+independente e preservou todos os textos. A interface oferece prévia e exportação.
+
+**Compatibilidade:** livros antigos continuam abrindo. Quando faltam original
+ou cantos, a exportação solicita o PDF e faz correspondência visual por página.
+Correspondências ambíguas são omitidas, preservando a região original.
+
+## Exigir grade e oferecer comparação visual
+
+**Problema:** `aceitar_quadrados=True` admitia textos, mapas e retratos mesmo
+com pontuação estrutural zero. A prévia individual dificultava a comparação
+de cada casa e podia exibir a foto original quando a Forsyth era inválida.
+
+**Decisão:** exigir evidência 8×8 no fluxo normal; oferecer comparação lado a
+lado como prévia padrão, com indicação explícita quando a posição não pode
+ser desenhada. Nos livros antigos, ocultar recortes descartados sem apagar
+dados e guardar a escolha manual de restaurar ou descartar.
+
+**Resultado:** no PDF de 601 páginas, 205 recortes removidos, 594 mantidos e
+341/341 referências independentes preservadas. Os sete exemplos apresentados
+pelo usuário viraram fixtures de regressão. O desenho usa os SVGs Cburnett
+obtidos diretamente de Wikimedia Commons sob a opção BSD-3-Clause, com
+arquivos originais, hashes, atribuição e licença incluídos na distribuição.

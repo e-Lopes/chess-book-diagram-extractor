@@ -1,0 +1,29 @@
+{
+  "referencias": 341,
+  "posicoes_exatas": 341,
+  "antes_posicoes_exatas": 333,
+  "casas_corretas": 21824,
+  "antes_casas_corretas": 21784,
+  "total_casas": 21824,
+  "diferencas_da_referencia": [],
+  "bolinhas": {
+    "posicao": "r2q1rk1/pp4pp/2p5/3p4/3P1p2/4P3/PP3PPP/1RR3K1",
+    "casas": [
+      "f3",
+      "h4",
+      "g5",
+      "f6",
+      "g6",
+      "h6",
+      "e7"
+    ]
+  },
+  "renderizacao": {
+    "svg_completo_ms": 44.454404996940866,
+    "previa_cache_ms": 0.8976819994859397
+  },
+  "segundos": 116.62041339999996,
+  "versao": "0.4.1",
+  "sha256_pdf": "b8bb0cf227ea8c30adb7c9d1460f30892ffc78e5a799be4a037e7603d897aa8f",
+  "protocolo": "341 recortes com referencias tipograficas; inferencia nova, sem revisao HOG pelo livro; renderizacao apos aquecer cache"
+}

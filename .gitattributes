@@ -1,0 +1,3 @@
+# Preserve the upstream bytes verified by the asset manifest and self-test.
+assets/pieces/cburnett/*.svg -text
+models/*.onnx binary

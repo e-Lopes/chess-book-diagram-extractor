@@ -124,6 +124,11 @@ deve substituir o arquivo produzido pelo CI. Depois da publicação, conferir
 tag, commit, estado estável e os quatro assets pela API do GitHub, além da
 igualdade entre os hashes publicados e o manifesto.
 
+Os SVGs originais das peças têm conversão de quebras de linha desativada em
+`.gitattributes`. Isso preserva os hashes do manifesto também no checkout do
+Windows com `core.autocrlf=true`. Os testes e o diagnóstico do executável
+conferem esses hashes antes da publicação.
+
 ## Atualizador
 
 Ao iniciar ou por solicitação no menu **Opções**, a aplicação consulta

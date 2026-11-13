@@ -1,5 +1,13 @@
 # Testes e qualidade
 
+A versão 0.5.0 passou em 186 testes locais. Os 21 casos novos cobrem a
+importação de diagramas avulsos: leitura de PNG, JPG, GIF, WEBP, cinza de
+16 bits, transparência e alfa zerado da área de transferência; localização do
+tabuleiro em capturas de sites reduzidas, recortes justos, páginas de texto e
+fotos inclinadas; interpretação de FEN completa e no outro alfabeto; aviso de
+pretas embaixo; troca de idioma durante o reconhecimento e Ctrl+V em campos
+de texto.
+
 A versão 0.4.1 passou em 165 testes locais. Os casos verificam a edição
 visual e seu seletor, margens de clique, movimento de reis, preservação do lado
 a jogar e dos campos FEN, rei duplicado em f7, moldura assimétrica da página

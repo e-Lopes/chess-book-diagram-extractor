@@ -76,6 +76,12 @@ das peças são locais; a rede é usada somente pelo atualizador.
 | `tests/` | Testes automatizados e fixtures públicas |
 | `.github/workflows/` | Build e publicação automatizados no GitHub Actions |
 
+## Versão 0.5.0
+
+[Notas da versão](RELEASE_NOTES_v0.5.0.md) descrevem a importação de um
+diagrama avulso por imagem colada (`Ctrl+V`) ou arquivo, com reconstrução
+editável e cópia da FEN. A versão passou em 186 testes locais.
+
 ## Versão 0.4.1
 
 [Notas da versão](RELEASE_NOTES_v0.4.1.md) descrevem a edição por clique/arraste,

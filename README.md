@@ -138,6 +138,21 @@ Quando os modelos reconhecem reis duplicados ou deixam de encontrar um rei,
 o aplicativo elege exatamente um de cada cor com base nas probabilidades,
 mantendo avisos nas casas ajustadas para conferência.
 
+### Importar um diagrama avulso de imagem
+
+Para obter a posição de um único diagrama visto em um site, PDF ou captura de
+tela, copie a imagem (botão direito → **Copiar imagem**, ou `Win+Shift+S`) e
+pressione `Ctrl+V` na janela principal, ou clique em **Importar diagrama de
+imagem** e use **Colar imagem** ou **Abrir arquivo…** (PNG, JPG, GIF, BMP ou
+WEBP). O tabuleiro é localizado mesmo no meio de uma página ou captura maior e
+reconhecido pelos mesmos modelos dos livros. A reconstrução pode ser corrigida
+clicando ou arrastando peças, ou colando uma FEN no campo **Posição** (aceita FEN
+completa e letras inglesas ou portuguesas). Use **Inverter tabuleiro** quando o
+diagrama mostra as pretas embaixo — o aplicativo avisa quando os peões sugerem
+isso —, escolha o lado a jogar e clique em **Copiar FEN** para obter a
+FEN completa em notação inglesa, ou **Abrir no Lichess** para analisar a posição.
+Essas posições avulsas não são salvas na biblioteca.
+
 Na biblioteca, use **Renomear** para alterar o nome interno e **Excluir** para
 remover apenas a cópia permanente do aplicativo. `F2`, `Delete` e `Enter`
 acionam, respectivamente, renomear, excluir e visualizar. Se uma extração ou

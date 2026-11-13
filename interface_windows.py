@@ -63,6 +63,8 @@ from revisor_forsyth import JanelaRevisaoForsyth
 from exportacao_padronizada_ui import exportar_livro_padronizado
 from visualizacao_diagramas import ComparadorDiagramas
 from reconhecimento_ui import reavaliar_imagem
+from importacao_imagem import imagem_da_area_transferencia
+from importacao_imagem_ui import JanelaImportarImagem, foco_em_campo_de_texto
 from version import GITHUB_REPOSITORY, __version__
 
 
@@ -196,6 +198,7 @@ class InterfaceExtrator:
         self.janela_sobre: ttk.Toplevel | None = None
         self.janela_ajuda: ttk.Toplevel | None = None
         self.janela_revisao: JanelaRevisaoForsyth | None = None
+        self.janela_importar_imagem: JanelaImportarImagem | None = None
         self.ultimo_diretorio = Path.cwd()
         self.logger = configurar_logger()
         self.biblioteca = BibliotecaLivros(pasta_dados_aplicativo())
@@ -214,6 +217,8 @@ class InterfaceExtrator:
         self.entrada.trace_add("write", self._ao_alterar_entrada)
         self.busca_biblioteca.trace_add("write", self._ao_filtrar_biblioteca)
         self.raiz.bind("<Return>", self._ao_pressionar_enter)
+        for sequencia in ("<Control-v>", "<Control-V>"):
+            self.raiz.bind(sequencia, self._ao_colar_imagem)
         self.raiz.after_idle(self._centralizar_janela)
         self.raiz.protocol("WM_DELETE_WINDOW", self._ao_fechar)
         self.raiz.after(100, self._verificar_eventos)
@@ -592,6 +597,20 @@ class InterfaceExtrator:
         )
         self.botao_cancelar.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         self.botao_cancelar.grid_remove()
+        self.botao_importar_imagem = ttk.Button(
+            acoes,
+            text="Importar diagrama de imagem",
+            command=self._abrir_importacao_imagem,
+            bootstyle="info outline",
+        )
+        self.botao_importar_imagem.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        ToolTip(
+            self.botao_importar_imagem,
+            text="Cole (Ctrl+V) ou abra a imagem de um único diagrama — PNG, JPG ou GIF — "
+                 "e obtenha a posição em FEN.",
+            wraplength=320,
+            delay=400,
+        )
         self._ocultar_acoes_resultado()
 
     def _criar_rodape(self, principal: ttk.Frame) -> None:
@@ -604,6 +623,30 @@ class InterfaceExtrator:
             style="Footer.TLabel",
             bootstyle="secondary",
         ).grid(row=0, column=0, sticky="e")
+
+    def _abrir_importacao_imagem(self, imagem=None) -> None:
+        janela = self.janela_importar_imagem
+        if janela is None or not janela.existe():
+            janela = JanelaImportarImagem(self.raiz, self.idioma_notacao.get(), self.ultimo_diretorio)
+            self.janela_importar_imagem = janela
+        else:
+            janela.definir_idioma(self.idioma_notacao.get())
+        janela.mostrar()
+        if imagem is not None:
+            janela.processar(imagem, "Imagem colada")
+
+    def _ao_colar_imagem(self, _evento: object = None) -> str | None:
+        # Campos de texto continuam recebendo o Ctrl+V normalmente.
+        if foco_em_campo_de_texto(self.raiz):
+            return None
+        try:
+            imagem = imagem_da_area_transferencia()
+        except ValueError:
+            imagem = None
+        if imagem is None:
+            return None
+        self._abrir_importacao_imagem(imagem)
+        return "break"
 
     def _mostrar_configuracoes(self) -> None:
         messagebox.showinfo(

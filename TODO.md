@@ -1,7 +1,7 @@
 # TODO — Biblioteca, visualizador e exportação PGN
 
-Funcionalidades concluídas até a v0.4.1. Os detalhes atuais estão nas
-[notas da versão](docs/RELEASE_NOTES_v0.4.1.md).
+Funcionalidades concluídas até a v0.5.0. Os detalhes atuais estão nas
+[notas da versão](docs/RELEASE_NOTES_v0.5.0.md).
 
 ## Visualizador de diagramas
 
@@ -54,3 +54,11 @@ Funcionalidades concluídas até a v0.4.1. Os detalhes atuais estão nas
 - [x] Exportação do livro com diagramas padronizados e preservação do texto.
 - [x] Atualização com validação do download e reabertura do aplicativo.
 - [x] 165 testes locais e 341 posições de referência exatas.
+
+## Importação por imagem na v0.5.0
+
+- [x] Colar (Ctrl+V) ou abrir a imagem de um único diagrama.
+- [x] Localizar o tabuleiro em capturas de sites, páginas de PDF e fotos.
+- [x] Reconstrução editável, Copiar FEN e Abrir no Lichess.
+- [x] Inverter tabuleiro e aviso de pretas embaixo.
+- [ ] Salvar diagramas avulsos em uma coleção da biblioteca com exportação PGN.

@@ -81,6 +81,21 @@ localizações, exclusões e o campo `revisao_necessaria`. As colunas **Diagrama
 inválida ou um reconhecimento incerto fica pendente; correções e confirmações
 manuais válidas permitem retomar a revisão sem executar os modelos novamente.
 
+### Importação de diagramas avulsos
+
+`importacao_imagem.py` carrega uma imagem de arquivo ou da área de
+transferência (via Pillow, incluindo GIF, transparência e cinza de 16 bits),
+localiza o tabuleiro com `detectar_tabuleiros()` e devolve o recorte. Capturas
+pequenas são ampliadas antes da busca; quando o quadro detectado já ocupa
+quase toda a imagem e está alinhado aos eixos, a imagem é usada inteira e
+`alinhar_grade()` cuida da moldura. Também interpreta o texto do campo de
+posição e converte para a FEN padrão.
+
+`importacao_imagem_ui.py` implementa `JanelaImportarImagem`, que reconhece em
+uma thread de trabalho com o mesmo `ReconhecedorForsyth` e reutiliza
+`ComparadorDiagramas` para a edição. A janela principal abre a importação pelo
+botão próprio ou por `Ctrl+V` quando o foco não está em um campo de texto.
+
 ### Atualização
 
 `autoupdate.py` consulta a última GitHub Release, compara versões semânticas,

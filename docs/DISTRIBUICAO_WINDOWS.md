@@ -117,7 +117,7 @@ download do README, que sempre aponta para a última Release.
 instaladores. São gerados somente depois da compilação e publicados junto dos
 arquivos, além do digest de asset fornecido pela API do GitHub.
 
-A v0.4.1 usa as [notas específicas da versão](RELEASE_NOTES_v0.4.1.md).
+A v0.5.0 usa as [notas específicas da versão](RELEASE_NOTES_v0.5.0.md).
 O instalador oficial é o artefato produzido pelo job da tag, com a documentação
 do mesmo commit. Um instalador local anterior pode ter hash diferente e não
 deve substituir o arquivo produzido pelo CI. Depois da publicação, conferir
